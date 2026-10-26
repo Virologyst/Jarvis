@@ -37,10 +37,11 @@ FRAME_S = 0.08
 SILENCE_TO_END_S = float(os.environ.get("JARVIS_END_SILENCE_S", "1.3"))
 # Silero voice detector score (0..1) that counts as speech
 VAD_THRESHOLD = float(os.environ.get("JARVIS_VAD_THRESHOLD", "0.5"))
-NO_SPEECH_CANCEL_S = 6.0   # give up if nothing is said after waking
+# Give up if nothing is said this long after "hey Jarvis" or a tap
+NO_SPEECH_CANCEL_S = float(os.environ.get("JARVIS_LISTEN_TIMEOUT_S", "10"))
 MAX_LISTEN_S = 25.0
 # After Jarvis answers, keep listening this long for a follow-up without "hey Jarvis" (0 = off)
-FOLLOW_UP_S = float(os.environ.get("JARVIS_FOLLOW_UP_S", "6"))
+FOLLOW_UP_S = float(os.environ.get("JARVIS_FOLLOW_UP_S", "10"))
 # Floor for "someone is talking". Headset mics with a noise gate read ~0 in silence and only
 # ~100-700 for normal speech, so keep this low; raise it for noisy rooms.
 MIN_SPEECH_RMS = float(os.environ.get("JARVIS_SPEECH_RMS", "120"))
