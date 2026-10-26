@@ -24,7 +24,7 @@ from .config import Settings
 from .llm import Conversation
 from .sentences import SentenceSplitter
 from .stt import Transcriber
-from .tts import Speaker
+from .tts import make_speaker
 
 log = logging.getLogger(__name__)
 
@@ -38,7 +38,7 @@ class Brain:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.stt = Transcriber(settings.stt_model, settings.stt_device)
-        self.tts = Speaker(settings.voice)
+        self.tts = make_speaker(settings.voice, settings.voice_speed, settings.voices_dir)
         self.client = anthropic.AsyncAnthropic()
         if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
             log.warning("No ANTHROPIC_API_KEY set (in .env or the environment). Jarvis can "
