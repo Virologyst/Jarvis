@@ -11,6 +11,7 @@ from collections.abc import Awaitable, Callable
 
 from jarvis_protocol import Card
 
+from . import clock
 from .themes import THEMES, describe
 
 log = logging.getLogger(__name__)
@@ -67,6 +68,38 @@ TOOLS = [
             ["theme"]),
         "strict": True,
     },
+    {
+        "name": "get_time",
+        "description": (
+            "The current time and date, here in Brisbane or anywhere in the world, from the system "
+            "clock and timezone database (daylight saving included). Always use this instead of "
+            "guessing the time or date. Leave place empty for here. If the place is ambiguous, the "
+            "result says so: ask which one they meant."),
+        "input_schema": _schema(
+            {"place": {"type": "string",
+                       "description": ("A city, country, region or IANA timezone, e.g. 'London', "
+                                       "'Portland, Maine', 'Japan', 'US Eastern'. Empty for "
+                                       "Brisbane.")}}),
+        "strict": True,
+    },
+    {
+        "name": "convert_time",
+        "description": (
+            "What time it is in one place when it's a given time in another, e.g. 'what time will "
+            "it be in Tokyo when it's 3pm here'. Places default to Brisbane. If a place is "
+            "ambiguous, the result says so: ask which one they meant."),
+        "input_schema": _schema(
+            {"time": {"type": "string", "description": "The time in from_place, as HH:MM, 24-hour."},
+             "from_place": {"type": "string",
+                            "description": "Where it's that time. Empty for Brisbane."},
+             "to_place": {"type": "string",
+                          "description": "Where to give the time for. Empty for Brisbane."},
+             "date": {"type": "string",
+                      "description": ("The date in from_place, YYYY-MM-DD, if they named a day. "
+                                      "Empty for the next time it's that time.")}},
+            ["time"]),
+        "strict": True,
+    },
 ]
 
 
@@ -97,6 +130,12 @@ class ToolBox:
             if not self.set_theme:
                 raise RuntimeError("themes aren't available here")
             text = await self.set_theme(str(args.get("theme", "")))
+        elif name == "get_time":
+            text = clock.current_time(args.get("place") or None)
+        elif name == "convert_time":
+            text = clock.convert_time(
+                str(args.get("time", "")), args.get("from_place") or None,
+                args.get("to_place") or None, args.get("date") or None)
         else:
             raise ValueError(f"unknown tool {name}")
         if card:
