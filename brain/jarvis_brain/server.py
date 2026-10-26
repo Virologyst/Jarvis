@@ -37,7 +37,7 @@ from .stt import Transcriber
 from .themes import DEFAULT_THEME, THEMES, ThemeStore, resolve
 from .tools import TOOLS, ToolBox
 from .tts import make_speaker
-from .voicecommands import voice_decision
+from .voicecommands import parse_voice_decision, pick_card
 from .wakecheck import heard_wake_phrase
 
 log = logging.getLogger(__name__)
@@ -61,12 +61,21 @@ class Brain:
             log.warning("No ANTHROPIC_API_KEY set (in .env or the environment). Jarvis can "
                         "hear and speak but can't answer until one is added, unless "
                         "`ant auth login` has been run for this account.")
-        self.approvals = ApprovalGate()
+        # Cards are saved here so they survive a restart (see approvals.py)
+        self.approvals = ApprovalGate(store=REPO_ROOT / "data" / "approvals.json")
         self.sessions: set[TerminalSession] = set()
         self.upgrades = UpgradeManager(REPO_ROOT, self.approvals, self.announce)
+        self.approvals.restore()   # after every owner of saved cards has registered
         self.themes = ThemeStore(REPO_ROOT / "data" / "themes.json")
-        # Said once to the first terminal that connects (e.g. "the last upgrade was rolled back")
-        self.notice = take_rollback_note(REPO_ROOT)
+        # Said once to the first terminal that connects: (card title, what to say)
+        rolled_back = take_rollback_note(REPO_ROOT)
+        self.notice: tuple[str, str] | None = ("Upgrade rolled back", rolled_back) if rolled_back else None
+
+    async def on_startup(self, app: web.Application) -> None:
+        """Pick up an upgrade a restart interrupted (needs the event loop, so not in __init__)."""
+        resumed = await self.upgrades.resume()
+        if resumed and not self.notice:
+            self.notice = ("Self-upgrade", resumed[0].upper() + resumed[1:])
 
     async def decide(self, card_id: str, decision: str) -> str:
         """Approve/reject a card (from a tap or a spoken word) and take it down on every screen."""
@@ -137,10 +146,9 @@ class TerminalSession:
             for card in self.brain.approvals.pending():
                 await self.send(card)
             if self.brain.notice:
-                notice, self.brain.notice = self.brain.notice, None
-                await self.send(Card(card_id=uuid.uuid4().hex, kind="info", title="Upgrade rolled back",
-                                     body=notice))
-                asyncio.create_task(self.speak_aside("Sir, " + notice))
+                (title, notice), self.brain.notice = self.brain.notice, None
+                await self.send(Card(card_id=uuid.uuid4().hex, kind="info", title=title, body=notice))
+                asyncio.create_task(self.speak_aside("Sir, " + notice[0].lower() + notice[1:]))
         elif isinstance(msg, ListenStart):
             await self._cancel_turn()  # talking over Jarvis interrupts it
             self.listening, self.audio = True, bytearray()
@@ -221,15 +229,18 @@ class TerminalSession:
         await self._guarded(typed())
 
     async def _voice_command(self, text: str) -> bool:
-        """'Approve' / 'reject' by voice: decided here in code, for the newest waiting card."""
-        decision = voice_decision(text)
-        if not decision:
+        """'Approve' / 'reject' by voice: decided here in code, for the newest waiting card
+        (or the newest one about what they named: 'approve the upgrade')."""
+        parsed = parse_voice_decision(text)
+        if not parsed:
             return False
+        decision, target = parsed
         pending = self.brain.approvals.pending()
-        if not pending:
-            await self._speak_text("[neutral] There's nothing waiting for approval, Sir.")
+        card = pick_card(pending, target)
+        if card is None:
+            what = f"no {target}" if target and pending else "nothing"
+            await self._speak_text(f"[neutral] There's {what} waiting for approval, Sir.")
             return True
-        card = pending[-1]
         log.info("[%s] %s by voice: %s", self.terminal_id, decision, card.title)
         result = await self.brain.decide(card.card_id, decision)
         await self._speak_text(result)
@@ -339,6 +350,7 @@ async def health(request: web.Request) -> web.Response:
 def build_app(settings: Settings) -> web.Application:
     app = web.Application()
     app["brain"] = Brain(settings)
+    app.on_startup.append(app["brain"].on_startup)
     app.router.add_get("/ws", ws_handler)
     app.router.add_get("/health", health)
     return app

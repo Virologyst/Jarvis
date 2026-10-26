@@ -20,14 +20,41 @@ step that changes anything.
 6. **Undo.** "Jarvis, undo the last upgrade" offers an approval card that resets to the commit
    before it.
 
-Logs for every job are in `data/upgrades/<id>/` on the brain PC: the request, Claude Code's
-output, the full diff (`diff.patch`) and the test output.
+Logs for every job are in `data/upgrades/<id>/` on the brain PC: the request, the job's state
+(`job.json`), Claude Code's output, the full diff (`diff.patch`) and the test output.
+
+## Approving by voice
+
+Say a short, plain approval: "Approve", "Approve the upgrade", "Jarvis, approve the upgrade
+please", "Go ahead and apply the upgrade", "Reject the upgrade". Naming what you mean
+("the upgrade", "the undo", "that email") picks the newest card about it; otherwise the newest
+card is used. It's decided in code from your words (`voicecommands.py`), never by Claude.
+Anything negated, a question, or with extra detail ("don't approve", "can you approve the
+upgrade?", "approve the email to Jo") is treated as conversation, not a decision; tap the card
+instead.
+
+## Restarts
+
+Restarting the brain doesn't lose an upgrade:
+
+- **Cards come back.** Approval cards are saved to `data/approvals.json` and restored at
+  start-up, with the same card on every screen. Only the code that made a card can rebuild what
+  it does, and only if it still makes sense (the file holds cards, never code).
+- **Work that was in progress starts again.** The job's progress is saved to
+  `data/upgrades/current.json` at every step. If the brain restarts while Claude Code is working
+  (the start was already approved), it stops any leftover Claude Code process, clears the old
+  worktree and starts the work again on a fresh branch (`jarvis/upgrade-<id>-r2`). After two
+  interrupted attempts it gives up and says so. Jarvis tells the first screen that connects.
+- **Ready results wait.** A finished upgrade's *Apply* card comes back, still needing your
+  approval.
+- A rejected or expired card frees Jarvis to take the next upgrade request.
 
 ## Guard rails (enforced in code)
 
 | Rule | Where |
 |---|---|
 | Nothing runs without an approval tap: start, apply, undo | `selfupgrade.py` via `approvals.py` |
+| A saved card is removed from disk before its action runs, so a crash can't replay it | `approvals.py` |
 | Claude Code works in a separate worktree, never the live checkout | `selfupgrade.py` |
 | Claude Code's tools: edit files, run pytest, read-only git. No web, push, commit, reset, rm, pip | `ALLOWED_TOOLS` / `DISALLOWED_TOOLS` |
 | Claude Code uses the Max login, never Jarvis's API key (removed from its environment) | `UpgradeManager._env` |

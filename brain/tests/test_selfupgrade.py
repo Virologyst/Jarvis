@@ -57,16 +57,23 @@ def setup(tmp_path, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "secret-api_key")
     monkeypatch.setenv("FAKE_NOTE", str(tmp_path / "saw-api-key.txt"))
 
-    gate = ApprovalGate()
     said: list[tuple[str, object]] = []
     restarts: list[int] = []
 
     async def announce(text, card):
         said.append((text, card))
 
-    mgr = UpgradeManager(repo, gate, announce, claude_cmd=[sys.executable, str(fake)],
-                         checks=[[sys.executable, "-c", "print('tests ok')"]],
-                         restart=lambda: restarts.append(1))
+    def boot() -> tuple[ApprovalGate, UpgradeManager]:
+        """A brain starting up: the same order as server.Brain (manager, then restore)."""
+        gate = ApprovalGate(store=repo / "data" / "approvals.json")
+        mgr = UpgradeManager(repo, gate, announce, claude_cmd=[sys.executable, str(fake)],
+                             checks=[[sys.executable, "-c", "print('tests ok')"]],
+                             restart=lambda: restarts.append(1))
+        gate.restore()
+        return gate, mgr
+
+    gate, mgr = boot()
+    mgr.reboot = boot   # tests call this to simulate restarting the brain
     return repo, gate, mgr, said, restarts
 
 
@@ -177,3 +184,112 @@ def test_parse_claude_output() -> None:
     out = "some log line\n" + json.dumps({"type": "result", "is_error": False, "result": "Done."})
     assert _parse_claude_output(out)["result"] == "Done."
     assert _parse_claude_output("not json")["is_error"] is True
+
+
+# ---- surviving a brain restart ---------------------------------------------
+
+def test_start_card_survives_a_restart(setup) -> None:
+    repo, _, mgr, said, _ = setup
+
+    async def flow():
+        _, card = mgr.request("Add a new ability")
+        gate2, mgr2 = mgr.reboot()                 # brain restarts before anyone approves
+        assert [c.card_id for c in gate2.pending()] == [card.card_id]
+        assert "waiting for your approval" in (await mgr2.resume())
+        await gate2.decide(card.card_id, "approve")
+        await wait_done(mgr2)
+        assert mgr2.job.status == "ready" and said[-1][1].kind == "approval"
+
+    asyncio.run(flow())
+
+
+def test_apply_card_survives_a_restart(setup) -> None:
+    repo, gate, mgr, said, restarts = setup
+
+    async def flow():
+        _, card = mgr.request("Add a new ability")
+        await gate.decide(card.card_id, "approve")
+        await wait_done(mgr)
+        apply_card = said[-1][1]
+        gate2, mgr2 = mgr.reboot()
+        assert [c.card_id for c in gate2.pending()] == [apply_card.card_id]
+        await mgr2.resume()
+        assert [c.card_id for c in gate2.pending()] == [apply_card.card_id]   # not duplicated
+        assert "applied" in (await gate2.decide(apply_card.card_id, "approve")).lower()
+        assert (repo / "feature.txt").exists() and restarts == [1]
+
+    asyncio.run(flow())
+
+
+def test_work_cut_short_by_a_restart_starts_again(setup) -> None:
+    repo, gate, mgr, said, _ = setup
+
+    async def flow():
+        _, card = mgr.request("Add a new ability")
+        # Approved and working when the brain died: what current.json says after a crash
+        mgr.job.status, mgr.job.attempts, mgr.job.started = "working", 1, 1.0
+        mgr._save(mgr.job)
+        gate.withdraw(card.card_id)
+        _, mgr2 = mgr.reboot()
+        note = await mgr2.resume()
+        assert "started that work again" in note
+        await wait_done(mgr2)
+        assert mgr2.job.status == "ready" and mgr2.job.attempts == 2
+        assert mgr2.job.branch.endswith("-r2")      # fresh names for the retry
+
+    asyncio.run(flow())
+
+
+def test_retries_after_restarts_are_limited(setup) -> None:
+    _, gate, mgr, _, _ = setup
+
+    async def flow():
+        _, card = mgr.request("Add a new ability")
+        mgr.job.status, mgr.job.attempts = "working", 2
+        mgr._save(mgr.job)
+        gate.withdraw(card.card_id)
+        _, mgr2 = mgr.reboot()
+        assert "stopped" in await mgr2.resume()
+        assert mgr2.job.status == "failed" and mgr2.worker is None
+
+    asyncio.run(flow())
+
+
+def test_a_rejected_upgrade_doesnt_block_the_next_one(setup) -> None:
+    _, gate, mgr, _, _ = setup
+
+    async def flow():
+        _, card = mgr.request("First thing")
+        await gate.decide(card.card_id, "reject")
+        text, second = mgr.request("Second thing")
+        assert second, text
+        await gate.decide(second.card_id, "reject")
+        _, mgr2 = mgr.reboot()                     # also after a restart
+        assert await mgr2.resume() is None
+        assert mgr2.request("Third thing")[1]
+
+    asyncio.run(flow())
+
+
+def test_saved_cards_hold_no_code_and_unknown_kinds_are_dropped(tmp_path) -> None:
+    store = tmp_path / "approvals.json"
+
+    async def act():
+        return "done"
+
+    gate = ApprovalGate(store=store)
+    gate.register("thing", lambda card: act)
+    gate.propose("Do a thing", "", act, data={"x": 1}, kind="thing")
+    gate.propose("Memory only", "", act)            # no kind: never saved
+    saved = json.loads(store.read_text())
+    assert [e["card"]["title"] for e in saved] == ["Do a thing"]
+
+    fresh = ApprovalGate(store=store)                # nobody registered "thing"
+    assert fresh.restore() == 0 and not fresh.pending()
+    assert json.loads(store.read_text()) == []       # and it's gone from disk
+
+    gate2 = ApprovalGate(store=store)
+    gate2.propose("Stale", "", act, kind="thing")
+    gate3 = ApprovalGate(store=store)
+    gate3.register("thing", lambda card: None)       # owner says it no longer applies
+    assert gate3.restore() == 0

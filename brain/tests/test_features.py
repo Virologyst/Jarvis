@@ -8,7 +8,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from jarvis_brain.emotions import EMOTIONS, TagStripper, parse_sentence  # noqa: E402
 from jarvis_brain.themes import THEMES, ThemeStore, resolve  # noqa: E402
 from jarvis_brain.tools import TOOLS  # noqa: E402
-from jarvis_brain.voicecommands import voice_decision  # noqa: E402
+from jarvis_brain.voicecommands import parse_voice_decision, pick_card, voice_decision  # noqa: E402
+from jarvis_protocol import Card  # noqa: E402
 
 
 def test_mood_tag_parsing() -> None:
@@ -43,6 +44,40 @@ def test_anything_else_is_conversation_not_a_decision() -> None:
                  "I approve of the new voice, it's lovely", "Approve and reject", "Okay",
                  "Yes", "Go ahead", "Cancel"]:
         assert voice_decision(text) is None, text
+    for text in ["Approve the upgrade later", "Can you approve the upgrade?",
+                 "Approve the upgrade and the email", "Approve the upgrade to version two",
+                 "Don't apply the upgrade", "Approve approve reject"]:
+        assert voice_decision(text) is None, text
+
+
+def test_natural_phrases_name_what_to_approve() -> None:
+    cases = {
+        "Approve the upgrade": ("approve", "upgrade"),
+        "Jarvis, approve the upgrade please": ("approve", "upgrade"),
+        "Hey Jarvis, approve the self-upgrade": ("approve", "upgrade"),
+        "Go ahead and approve it, Jarvis": ("approve", None),
+        "Yes, go ahead and apply the upgrade": ("approve", "upgrade"),
+        "Approve that change, Sir": ("approve", "upgrade"),
+        "Approve the undo": ("approve", "undo"),
+        "Reject the upgrade": ("reject", "upgrade"),
+        "Decline that email": ("reject", "email"),
+        "Approve the latest one": ("approve", None),
+    }
+    for text, expected in cases.items():
+        assert parse_voice_decision(text) == expected, text
+
+
+def test_spoken_target_picks_the_right_card() -> None:
+    upgrade = Card("u1", "approval", "Start a self-upgrade", data={"upgrade_id": "a", "step": "start"})
+    email = Card("e1", "approval", "Send the email to Jo")
+    undo = Card("d1", "approval", "Undo the last upgrade", data={"upgrade_id": "b", "step": "undo"})
+    pending = [upgrade, email]                      # newest last
+    assert pick_card(pending, None) is email
+    assert pick_card(pending, "upgrade") is upgrade
+    assert pick_card(pending, "email") is email
+    assert pick_card(pending, "undo") is None
+    assert pick_card([email, undo], "upgrade") is undo   # "the upgrade" covers undoing one
+    assert pick_card([], None) is None
 
 
 def test_theme_lookup() -> None:
