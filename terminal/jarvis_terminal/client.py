@@ -23,8 +23,8 @@ import numpy as np
 from aiohttp import WSMsgType, web
 
 from jarvis_protocol import (
-    AudioEnd, AudioStart, Decision, Hello, ListenCancel, ListenEnd, ListenStart,
-    State, WakeCheck, WakeResult, decode, encode,
+    AudioEnd, AudioStart, Decision, Emote, Hello, ListenCancel, ListenEnd, ListenStart,
+    SetTheme, State, UserInput, WakeCheck, WakeResult, decode, encode,
 )
 
 from .audio import Microphone, Player, refresh_devices, rms
@@ -81,6 +81,7 @@ class Terminal:
         self.ui_port = ui_port
         self.wake = WakeWord(threshold=wake_threshold, candidate=WAKE_CANDIDATE) if use_wake else None
         self.preroll: collections.deque[bytes] = collections.deque(maxlen=int(PREROLL_S / FRAME_S))
+        self.theme: str | None = None   # set by the brain (SetTheme)
         self._wake_check: tuple[str, float] | None = None   # (check_id, sent at)
         self.mic_device, self.speaker_device = mic_device, speaker_device
 
@@ -299,6 +300,13 @@ class Terminal:
         if isinstance(msg, WakeResult):
             await self.on_wake_result(msg)
             return  # nothing for the page to show
+        if isinstance(msg, Emote):
+            # Show it when its sentence is actually heard, not when it arrives
+            delay = self.player.buffered_seconds
+            payload = json.loads(raw)
+            asyncio.get_running_loop().call_later(
+                delay, lambda: asyncio.create_task(self.to_ui(payload)))
+            return
         if isinstance(msg, AudioStart):
             self._replied = True  # Jarvis is answering, so a follow-up makes sense afterwards
             self.player.begin(msg.sample_rate)
@@ -306,16 +314,20 @@ class Terminal:
             pass  # playback drains on its own
         elif isinstance(msg, State):
             self.brain_state = msg.state
+        elif isinstance(msg, SetTheme):
+            self.theme = msg.theme   # remembered for pages that connect later
         await self.to_ui(json.loads(raw))  # the page shows everything the brain says
 
     # ---- touchscreen page ---------------------------------------------
 
     async def ui_events(self, request: web.Request) -> web.WebSocketResponse:
-        ws = web.WebSocketResponse(heartbeat=20)
+        ws = web.WebSocketResponse(heartbeat=20, max_msg_size=32 * 1024 * 1024)  # pictures
         await ws.prepare(request)
         self.ui_sockets.add(ws)
         await ws.send_str(json.dumps({"type": "connection", "connected": self.brain_ws is not None}))
         await ws.send_str(json.dumps({"type": "terminal_state", "state": self.state}))
+        if self.theme:
+            await ws.send_str(json.dumps({"type": "set_theme", "theme": self.theme}))
         try:
             async for msg in ws:
                 if msg.type != WSMsgType.TEXT:
@@ -325,6 +337,18 @@ class Terminal:
                     await self.toggle("button")
                 elif action.get("action") == "decision":
                     await self.to_brain(Decision(action["card_id"], action["decision"]))
+                elif action.get("action") == "say":
+                    # Typed text / pictures: stop listening if we were, then send it on
+                    if self.state == "listening":
+                        await self.stop_listening(cancel=True)
+                    self.player.clear()
+                    images = [{"media_type": str(i.get("media_type", "")), "data": str(i.get("data", ""))}
+                              for i in action.get("images", [])][:5]
+                    self._replied = False
+                    if await self.to_brain(UserInput(str(action.get("text", "")), images)):
+                        await self.set_state("waiting")
+                elif action.get("action") == "theme":
+                    await self.to_brain(SetTheme(str(action.get("theme", ""))))
         finally:
             self.ui_sockets.discard(ws)
         return ws
@@ -349,6 +373,16 @@ class Terminal:
                 await self.to_ui({"type": "eye", **self.eye.snapshot()})
             await asyncio.sleep(1 / EYE_HZ)
 
+    async def voice_level_loop(self) -> None:
+        """While Jarvis speaks, send how loud it is (~20 times a second) so the face moves with it."""
+        was_busy = False
+        while True:
+            busy = self.player.busy
+            if self.ui_sockets and (busy or was_busy):
+                await self.to_ui({"type": "voice_level", "level": round(self.player.level if busy else 0, 3)})
+            was_busy = busy
+            await asyncio.sleep(1 / EYE_HZ)
+
     async def keyboard_loop(self) -> None:
         """Press Enter in the console to talk (handy when developing)."""
         while True:
@@ -362,6 +396,7 @@ class Terminal:
             tasks.append(asyncio.create_task(self.keyboard_loop()))
         if self.eye:
             tasks.append(asyncio.create_task(self.eye_loop()))
+        tasks.append(asyncio.create_task(self.voice_level_loop()))
         try:
             await asyncio.gather(*tasks)
         finally:

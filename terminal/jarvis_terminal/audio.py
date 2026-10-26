@@ -84,6 +84,14 @@ class Player:
         with self._lock:
             return len(self._buffer) > 0
 
+    @property
+    def buffered_seconds(self) -> float:
+        """How long until everything queued so far has been heard."""
+        with self._lock:
+            return len(self._buffer) / 2 / self._rate if self._rate else 0.0
+
+    level = 0.0   # loudness of what's playing right now, 0..1 (drives the face's movement)
+
     def _callback(self, outdata, frames, time_info, status) -> None:
         need = frames * 2
         with self._lock:
@@ -92,6 +100,7 @@ class Player:
         outdata[:len(chunk)] = chunk
         if len(chunk) < need:
             outdata[len(chunk):] = b"\x00" * (need - len(chunk))
+        self.level = min(1.0, rms(chunk) / 6000.0) if chunk else 0.0
 
     def close(self) -> None:
         if self._stream is not None:

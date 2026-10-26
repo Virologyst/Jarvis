@@ -36,8 +36,10 @@ class Conversation:
         self.messages: list[dict] = []
         self.last_turn = 0.0
 
-    async def reply(self, user_text: str) -> AsyncIterator[str]:
+    async def reply(self, user_text: str | list[dict]) -> AsyncIterator[str]:
         """Yield the reply as text pieces, running any tools Claude calls along the way.
+
+        user_text is what was said, or a list of content blocks (pictures plus text).
 
         Records the turn when complete; on cancel or error the whole unfinished turn is dropped
         (the history before it is untouched, so it stays append-only).

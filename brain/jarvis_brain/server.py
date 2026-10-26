@@ -1,7 +1,12 @@
 """WebSocket server: one session per connected terminal.
 
 Turn pipeline (all streamed so Jarvis starts talking quickly):
-  mic audio -> speech-to-text -> Claude (text pieces) -> sentences -> Piper -> audio out
+  mic audio -> speech-to-text -> Claude (text pieces) -> sentences -> text-to-speech -> audio out
+  (or typed text/pictures from the screen straight into Claude)
+
+Each sentence starts with a mood tag ([amused] ...) that becomes an Emote message timed to its
+audio; tags are stripped from everything shown or spoken. A short spoken "approve"/"reject" is
+handled here in code and never reaches Claude.
 """
 
 from __future__ import annotations
@@ -17,24 +22,31 @@ import anthropic
 from aiohttp import WSMsgType, web
 
 from jarvis_protocol import (
-    AudioEnd, AudioStart, Card, Decision, Error, Hello, ListenCancel, ListenEnd,
-    ListenStart, ReplyText, State, Transcript, WakeCheck, WakeResult, Welcome, decode, encode,
+    AudioEnd, AudioStart, Card, CardDone, Decision, Emote, Error, Hello, ListenCancel, ListenEnd,
+    ListenStart, ReplyText, SetTheme, State, Transcript, UserInput, WakeCheck, WakeResult,
+    Welcome, decode, encode,
 )
 
 from .approvals import ApprovalGate
 from .config import REPO_ROOT, Settings
+from .emotions import TagStripper, parse_sentence
 from .llm import Conversation
 from .selfupgrade import UpgradeManager, take_rollback_note
 from .sentences import SentenceSplitter
 from .stt import Transcriber
+from .themes import DEFAULT_THEME, THEMES, ThemeStore, resolve
 from .tools import TOOLS, ToolBox
 from .tts import make_speaker
+from .voicecommands import voice_decision
 from .wakecheck import heard_wake_phrase
 
 log = logging.getLogger(__name__)
 
 AUDIO_CHUNK_BYTES = 8192   # size of speech frames sent to terminals
 MAX_UTTERANCE_S = 30       # ignore audio beyond this per turn
+MAX_IMAGES = 5             # pictures per typed message
+IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+WS_MAX_BYTES = 32 * 1024 * 1024
 
 
 class Brain:
@@ -52,8 +64,15 @@ class Brain:
         self.approvals = ApprovalGate()
         self.sessions: set[TerminalSession] = set()
         self.upgrades = UpgradeManager(REPO_ROOT, self.approvals, self.announce)
+        self.themes = ThemeStore(REPO_ROOT / "data" / "themes.json")
         # Said once to the first terminal that connects (e.g. "the last upgrade was rolled back")
         self.notice = take_rollback_note(REPO_ROOT)
+
+    async def decide(self, card_id: str, decision: str) -> str:
+        """Approve/reject a card (from a tap or a spoken word) and take it down on every screen."""
+        result = await self.approvals.decide(card_id, decision)
+        await self.broadcast(CardDone(card_id))
+        return result
 
     async def broadcast(self, msg) -> None:
         for s in list(self.sessions):
@@ -73,13 +92,26 @@ class TerminalSession:
         self.brain = brain
         self.ws = ws
         self.terminal_id = "unknown"
+        self.theme = THEMES[DEFAULT_THEME]
         s = brain.settings
-        tools = ToolBox(brain.upgrades, self.send)
+        tools = ToolBox(brain.upgrades, self.send, current_theme=lambda: self.theme.title,
+                        set_theme=self.set_theme)
         self.conversation = Conversation(brain.client, s.model, s.effort, s.idle_reset_minutes,
                                          tools=TOOLS, run_tool=tools.run)
         self.listening = False
         self.audio = bytearray()
         self.turn: asyncio.Task | None = None
+
+    async def set_theme(self, name: str, announce: bool = True) -> str:
+        theme = resolve(name)
+        if theme is None:
+            raise ValueError(f"no theme called {name!r}; options: {', '.join(THEMES)}")
+        self.theme = theme
+        self.brain.themes.set(self.terminal_id, theme)
+        await self.send(SetTheme(theme.name))
+        log.info("[%s] theme -> %s", self.terminal_id, theme.name)
+        voice = " It has its own voice, so you'll hear a change." if theme.voice else ""
+        return f"Switched this screen to the {theme.title} theme.{voice}"
 
     async def send(self, msg) -> None:
         if not self.ws.closed:
@@ -100,6 +132,8 @@ class TerminalSession:
             self.terminal_id = msg.terminal_id
             log.info("terminal connected: %s", self.terminal_id)
             await self.send(Welcome())
+            self.theme = self.brain.themes.get(self.terminal_id)
+            await self.send(SetTheme(self.theme.name))
             for card in self.brain.approvals.pending():
                 await self.send(card)
             if self.brain.notice:
@@ -122,8 +156,15 @@ class TerminalSession:
         elif isinstance(msg, WakeCheck):
             asyncio.create_task(self._wake_check(msg))
         elif isinstance(msg, Decision):
-            result = await self.brain.approvals.decide(msg.card_id, msg.decision)
+            result = await self.brain.decide(msg.card_id, msg.decision)
             await self.speak_aside(result)
+        elif isinstance(msg, UserInput):
+            await self._cancel_turn()
+            self.listening, self.audio = False, bytearray()
+            self.turn = asyncio.create_task(self._run_typed_turn(msg))
+        elif isinstance(msg, SetTheme):
+            with contextlib.suppress(ValueError):   # picked on the screen: switch, quietly
+                await self.set_theme(msg.theme)
 
     def on_audio(self, data: bytes) -> None:
         if self.listening and len(self.audio) < MAX_UTTERANCE_S * 16_000 * 2:
@@ -149,15 +190,55 @@ class TerminalSession:
             await self.send(AudioEnd())
 
     async def _run_turn(self, pcm: bytes) -> None:
-        try:
+        async def spoken():
             await self.send(State("thinking"))
             text = await asyncio.to_thread(self.brain.stt.transcribe, pcm)
             log.info("[%s] heard: %r", self.terminal_id, text)
             if not text:
-                await self.send(State("idle"))
                 return
             await self.send(Transcript(text))
+            if await self._voice_command(text):
+                return
             await self._speak_stream(self.conversation.reply(text))
+        await self._guarded(spoken())
+
+    async def _run_typed_turn(self, msg: UserInput) -> None:
+        async def typed():
+            await self.send(State("thinking"))
+            text = msg.text.strip()
+            images = [i for i in msg.images if i.get("media_type") in IMAGE_TYPES and i.get("data")]
+            images = images[:MAX_IMAGES]
+            log.info("[%s] typed: %r (+%d pictures)", self.terminal_id, text, len(images))
+            if not images and await self._voice_command(text):
+                return
+            if not text and not images:
+                return
+            content = [{"type": "image", "source": {"type": "base64", "media_type": i["media_type"],
+                                                    "data": i["data"]}} for i in images]
+            content.append({"type": "text", "text": (text or "Have a look at this.") +
+                            "\n\n(Typed on the screen, not spoken.)"})
+            await self._speak_stream(self.conversation.reply(content))
+        await self._guarded(typed())
+
+    async def _voice_command(self, text: str) -> bool:
+        """'Approve' / 'reject' by voice: decided here in code, for the newest waiting card."""
+        decision = voice_decision(text)
+        if not decision:
+            return False
+        pending = self.brain.approvals.pending()
+        if not pending:
+            await self._speak_text("[neutral] There's nothing waiting for approval, Sir.")
+            return True
+        card = pending[-1]
+        log.info("[%s] %s by voice: %s", self.terminal_id, decision, card.title)
+        result = await self.brain.decide(card.card_id, decision)
+        await self._speak_text(result)
+        return True
+
+    async def _guarded(self, turn) -> None:
+        """Run a turn, turning failures into something Jarvis says instead of a crash."""
+        try:
+            await turn
         except asyncio.CancelledError:
             raise
         except anthropic.AuthenticationError as e:
@@ -186,15 +267,23 @@ class TerminalSession:
         await self._speak_stream(once())
 
     async def _speak_stream(self, pieces) -> None:
-        """Send reply text as it arrives and speak it sentence by sentence."""
+        """Send reply text as it arrives and speak it sentence by sentence.
+
+        Mood tags are stripped from the text shown on screen; each spoken sentence's tag becomes
+        an Emote sent just before its audio.
+        """
         sentences: asyncio.Queue[str | None] = asyncio.Queue()
         speaker = asyncio.create_task(self._speak_worker(sentences))
         splitter = SentenceSplitter()
+        shown = TagStripper()
         try:
             async for piece in pieces:
-                await self.send(ReplyText(piece))
+                if text := shown.feed(piece):
+                    await self.send(ReplyText(text))
                 for sentence in splitter.feed(piece):
                     sentences.put_nowait(sentence)
+            if text := shown.flush():
+                await self.send(ReplyText(text))
             for sentence in splitter.flush():
                 sentences.put_nowait(sentence)
             await self.send(ReplyText(done=True))
@@ -207,11 +296,16 @@ class TerminalSession:
         started = False
         try:
             while (sentence := await sentences.get()) is not None:
-                pcm = await asyncio.to_thread(self.brain.tts.synthesize, sentence)
+                emotion, clean = parse_sentence(sentence)
+                if not any(c.isalnum() for c in clean):
+                    continue
+                pcm = await asyncio.to_thread(self.brain.tts.synthesize, clean,
+                                              self.theme.voice, self.theme.speed)
                 if not started:
                     started = True
                     await self.send(State("speaking"))
                     await self.send(AudioStart(self.brain.tts.sample_rate))
+                await self.send(Emote(emotion))
                 for i in range(0, len(pcm), AUDIO_CHUNK_BYTES):
                     await self.ws.send_bytes(pcm[i:i + AUDIO_CHUNK_BYTES])
         finally:
@@ -221,7 +315,7 @@ class TerminalSession:
 
 async def ws_handler(request: web.Request) -> web.WebSocketResponse:
     brain: Brain = request.app["brain"]
-    ws = web.WebSocketResponse(heartbeat=20, max_msg_size=4 * 1024 * 1024)
+    ws = web.WebSocketResponse(heartbeat=20, max_msg_size=WS_MAX_BYTES)   # pictures can be big
     await ws.prepare(request)
     session = TerminalSession(brain, ws)
     brain.sessions.add(session)

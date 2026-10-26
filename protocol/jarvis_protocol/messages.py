@@ -13,7 +13,8 @@ from typing import Any
 __all__ = [
     "Hello", "Welcome", "ListenStart", "ListenEnd", "ListenCancel",
     "State", "Transcript", "ReplyText", "AudioStart", "AudioEnd",
-    "Card", "Decision", "Error", "WakeCheck", "WakeResult", "encode", "decode",
+    "Card", "Decision", "Error", "WakeCheck", "WakeResult",
+    "UserInput", "SetTheme", "Emote", "CardDone", "encode", "decode",
 ]
 
 _REGISTRY: dict[str, type] = {}
@@ -64,6 +65,25 @@ class WakeCheck:
     """
     check_id: str
     audio_b64: str
+
+
+@_message("user_input")
+@dataclass
+class UserInput:
+    """Typed text and/or pictures from the screen, instead of speech.
+
+    images: [{"media_type": "image/jpeg", "data": "<base64>"}], already downscaled by the page.
+    """
+    text: str = ""
+    images: list[dict[str, str]] = field(default_factory=list)
+
+
+@_message("set_theme")
+@dataclass
+class SetTheme:
+    """Both ways: the brain tells a terminal which theme to show (after "switch to the eye
+    theme"), and a terminal tells the brain when someone picks one on screen."""
+    theme: str
 
 
 @_message("decision")
@@ -130,6 +150,24 @@ class Card:
     title: str
     body: str = ""
     data: dict[str, Any] = field(default_factory=dict)
+
+
+@_message("emote")
+@dataclass
+class Emote:
+    """The mood of the sentence whose audio follows; the face shows it as it's spoken.
+
+    Sent just before that sentence's audio, so the terminal can time it to playback.
+    emotion: one of brain/jarvis_brain/emotions.py EMOTIONS.
+    """
+    emotion: str
+
+
+@_message("card_done")
+@dataclass
+class CardDone:
+    """A card was approved or rejected (on any screen, or by voice): take it down everywhere."""
+    card_id: str
 
 
 @_message("wake_result")

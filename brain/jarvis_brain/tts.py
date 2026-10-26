@@ -41,16 +41,28 @@ class KokoroSpeaker:
                 "Fetch them with: python brain/scripts/get_voice.py kokoro"
             )
         self.kokoro = Kokoro(str(model), str(voices))
-        self.mix = _parse_mix(spec)
-        self.style = sum(w * self.kokoro.get_voice_style(v) for v, w in self.mix.items())
+        self.spec = spec
+        self._styles: dict[str, np.ndarray] = {}
         self.speed = speed
         self.sample_rate = 24_000
         self.synthesize("Ready.")  # first call is slow; pay it at start-up, not mid-reply
         log.info("text-to-speech: Kokoro %s at %.2fx speed", spec, speed)
 
-    def synthesize(self, text: str) -> bytes:
-        """Text -> mono int16 PCM at self.sample_rate."""
-        audio, rate = self.kokoro.create(text, voice=self.style, speed=self.speed, lang="en-gb")
+    def _style(self, spec: str) -> np.ndarray:
+        if spec not in self._styles:
+            mix = _parse_mix(spec)
+            self._styles[spec] = sum(w * self.kokoro.get_voice_style(v) for v, w in mix.items())
+        return self._styles[spec]
+
+    def synthesize(self, text: str, voice: str | None = None, speed: float | None = None) -> bytes:
+        """Text -> mono int16 PCM at self.sample_rate.
+
+        voice: another Kokoro voice for this sentence ("kokoro:bf_lily" or "bf_lily"), e.g. a
+        theme's own voice; None uses the default.
+        """
+        spec = (voice or self.spec).removeprefix("kokoro:")
+        audio, rate = self.kokoro.create(text, voice=self._style(spec), speed=speed or self.speed,
+                                         lang="en-gb")
         self.sample_rate = rate
         return (np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
 
@@ -79,6 +91,6 @@ class PiperSpeaker:
         self.synthesize("Ready.")
         log.info("text-to-speech: Piper %s at %d Hz", voice_path.name, self.sample_rate)
 
-    def synthesize(self, text: str) -> bytes:
-        """Text -> mono int16 PCM at self.sample_rate."""
+    def synthesize(self, text: str, voice: str | None = None, speed: float | None = None) -> bytes:
+        """Text -> mono int16 PCM at self.sample_rate. (Theme voices need Kokoro; ignored here.)"""
         return b"".join(chunk.audio_int16_bytes for chunk in self.voice.synthesize(text))

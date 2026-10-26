@@ -289,9 +289,11 @@ function status() {
 let last = performance.now(), lastStatus = 0;
 function frame(t) {
   const dt = Math.min(0.05, (t - last) / 1000); last = t;
-  const st = step(t, dt);
-  draw(t, st);
-  if (t - lastStatus > 300) { status(); lastStatus = t; }
+  if (document.body.dataset.theme === "eye") {   // another theme showing: don't spend the CPU
+    const st = step(t, dt);
+    draw(t, st);
+    if (t - lastStatus > 300) { status(); lastStatus = t; }
+  }
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);

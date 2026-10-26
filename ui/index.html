@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
 <title>Jarvis</title>
 <style>
+  /* ===== shared ===== */
   :root {
     --bg: #0b0f14; --panel: #131a22; --text: #e6edf3; --muted: #7d8a99;
     --accent: #3fb6ff; --listen: #3ddc97; --think: #f5b942; --speak: #3fb6ff;
@@ -14,9 +15,12 @@
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
     font: 18px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; overflow: hidden;
     user-select: none; -webkit-user-select: none; }
+  button { font: inherit; color: inherit; }
+  #arc { position: fixed; inset: 0; width: 100vw; height: 100vh; display: none; }
+
+  /* ===== Eye theme (the original layout) ===== */
   main { display: grid; grid-template-columns: minmax(280px, 40%) 1fr; height: 100%; }
   @media (max-width: 700px) { main { grid-template-columns: 1fr; grid-template-rows: auto 1fr; } }
-
   .left { display: flex; flex-direction: column; align-items: center; justify-content: center;
     gap: 12px; padding: 24px; min-height: 0; }
   @media (max-width: 700px) { .left { height: 45vh; padding: 16px; } }
@@ -33,35 +37,97 @@
   body[data-state="thinking"] #talk { box-shadow: 0 0 0 3px var(--think), 0 0 40px rgba(245,185,66,.25); }
   body[data-state="speaking"] #talk { box-shadow: 0 0 0 3px var(--speak), 0 0 50px rgba(63,182,255,.35); }
   #eye-status { font-size: 12px; color: var(--muted); opacity: .7; }
-
   #status { color: var(--muted); font-size: 16px; min-height: 1.4em; text-align: center; }
   #conn { font-size: 13px; color: var(--muted); }
   #conn.down { color: var(--danger); }
 
-  .right { display: flex; flex-direction: column; min-height: 0; padding: 24px 24px 24px 0; gap: 16px; }
-  @media (max-width: 700px) { .right { padding: 0 16px 16px; } }
+  .right { display: flex; flex-direction: column; min-height: 0; padding: 24px 24px 16px 0; gap: 12px; }
+  @media (max-width: 700px) { .right { padding: 0 16px 12px; } }
   #cards:empty { display: none; }
   #cards { display: flex; flex-direction: column; gap: 12px; }
   .card { background: var(--panel); border: 1px solid var(--border); border-left: 4px solid var(--think);
     border-radius: 12px; padding: 14px 16px; }
   .card h3 { margin: 0 0 6px; font-size: 18px; }
-  .card p { margin: 0 0 12px; color: var(--muted); white-space: pre-wrap; }
+  .card p { margin: 0 0 12px; color: var(--muted); white-space: pre-wrap; max-height: 40vh; overflow-y: auto; }
   .card .actions { display: flex; gap: 10px; }
   .card button { flex: 1; min-height: 52px; border-radius: 10px; border: 1px solid var(--border);
-    background: #1b2733; color: var(--text); font-size: 18px; touch-action: manipulation; }
+    background: #1b2733; font-size: 18px; touch-action: manipulation; }
   .card button.approve { background: #16402d; border-color: var(--listen); }
   .card button.reject { background: #3a1c1f; border-color: var(--danger); }
+  .card .say { font-size: 13px; color: var(--muted); margin-top: 8px; text-align: center; }
 
   #log { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 10px;
     padding-right: 4px; scroll-behavior: smooth; }
-  .msg { max-width: 85%; padding: 10px 14px; border-radius: 14px; white-space: pre-wrap; }
+  .msg { max-width: 85%; padding: 10px 14px; border-radius: 14px; white-space: pre-wrap; user-select: text; }
   .msg.you { align-self: flex-end; background: #1d3347; }
   .msg.jarvis { align-self: flex-start; background: var(--panel); border: 1px solid var(--border); }
   .msg.err { align-self: center; color: var(--danger); font-size: 14px; background: none; }
+  .msg img { display: block; max-width: 220px; max-height: 160px; border-radius: 8px; margin-bottom: 6px; }
   .hint { color: var(--muted); text-align: center; margin: auto; }
+
+  /* ===== the input bar (type, attach or paste pictures) ===== */
+  #composer { display: flex; flex-direction: column; gap: 8px; }
+  #thumbs:empty { display: none; }
+  #thumbs { display: flex; gap: 8px; flex-wrap: wrap; }
+  #thumbs .t { position: relative; }
+  #thumbs img { height: 64px; border-radius: 8px; display: block; }
+  #thumbs .x { position: absolute; top: -8px; right: -8px; width: 24px; height: 24px; border-radius: 50%;
+    border: 0; background: #000c; font-size: 14px; line-height: 24px; padding: 0; cursor: pointer; }
+  #compose-row { display: flex; gap: 8px; align-items: center; }
+  #text { flex: 1; min-width: 0; height: 48px; border-radius: 12px; border: 1px solid var(--border);
+    background: var(--panel); color: var(--text); padding: 0 14px; font: inherit; user-select: text; }
+  #text:focus { outline: none; border-color: var(--accent); }
+  .icon { width: 48px; height: 48px; border-radius: 12px; border: 1px solid var(--border);
+    background: var(--panel); font-size: 22px; cursor: pointer; flex: none; padding: 0;
+    touch-action: manipulation; }
+  #send { background: #16324a; border-color: var(--accent); }
+  #file { display: none; }
+  body.dragging::after { content: "Drop pictures for Jarvis"; position: fixed; inset: 0; z-index: 50;
+    display: grid; place-items: center; background: #000a; font-size: 28px; color: var(--accent);
+    border: 3px dashed var(--accent); }
+
+  #theme-btn { position: fixed; top: 10px; right: 10px; z-index: 20; width: 40px; height: 40px;
+    border-radius: 50%; border: 1px solid var(--border); background: #0008; font-size: 18px;
+    cursor: pointer; opacity: .55; }
+  #theme-btn:hover { opacity: 1; }
+
+  /* ===== Arc theme ===== */
+  body[data-theme="arc"] { background: #000; }
+  body[data-theme="arc"] #arc { display: block; cursor: pointer; }
+  body[data-theme="arc"] main { display: block; }
+  body[data-theme="arc"] .left { display: none; }
+  body[data-theme="arc"] #theme-btn { border-color: #1d4a66; color: #9fe6ff; }
+  /* conversation fades in from the bottom; no boxes, no borders */
+  body[data-theme="arc"] .right { position: fixed; left: 0; right: 0; bottom: 0; padding: 0 6vw 18px;
+    pointer-events: none; gap: 10px; }
+  body[data-theme="arc"] #log { height: 33vh; flex: none; gap: 6px; overflow-y: hidden;
+    -webkit-mask-image: linear-gradient(to top, #000 45%, transparent 100%);
+            mask-image: linear-gradient(to top, #000 45%, transparent 100%); }
+  body[data-theme="arc"] .hint { display: none; }
+  body[data-theme="arc"] .msg { max-width: 100%; padding: 0; border: 0; background: none; border-radius: 0;
+    font-size: 19px; }
+  body[data-theme="arc"] .msg.jarvis { color: #dff7ff; text-shadow: 0 0 10px rgba(64,190,255,.75); }
+  body[data-theme="arc"] .msg.you { align-self: flex-end; color: #6fa9c4; text-align: right; }
+  body[data-theme="arc"] #composer { pointer-events: auto; }
+  body[data-theme="arc"] #text { background: transparent; border: 0; border-bottom: 1px solid #1d4a66;
+    border-radius: 0; color: #dff7ff; }
+  body[data-theme="arc"] #text:focus { border-bottom-color: #7fdcff; box-shadow: 0 6px 12px -8px #40beff; }
+  body[data-theme="arc"] .icon { background: transparent; border: 0; color: #7fdcff;
+    text-shadow: 0 0 8px #40beff; }
+  body[data-theme="arc"] #cards { position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
+    width: min(560px, 92vw); pointer-events: auto; z-index: 10; }
+  body[data-theme="arc"] .card { background: rgba(0, 12, 20, .88); border: 1px solid #1d4a66;
+    border-left: 3px solid #7fdcff; box-shadow: 0 0 24px rgba(64,190,255,.25); }
+  body[data-theme="arc"] #arc-status { display: block; }
+  #arc-status { display: none; position: fixed; top: 14px; left: 16px; font-size: 13px; color: #3f7f9e;
+    letter-spacing: .1em; text-transform: uppercase; pointer-events: none; }
+  #arc-status.down { color: var(--danger); }
 </style>
 </head>
-<body data-state="idle">
+<body data-state="idle" data-theme="eye">
+<canvas id="arc" aria-label="Talk to Jarvis"></canvas>
+<div id="arc-status"></div>
+<button id="theme-btn" title="Change theme" aria-label="Change theme">◐</button>
 <main>
   <section class="left">
     <button id="talk" aria-label="Talk to Jarvis"><canvas id="eye"></canvas><span class="sub" id="sub">tap to talk</span></button>
@@ -72,13 +138,24 @@
   <section class="right">
     <div id="cards"></div>
     <div id="log"><div class="hint" id="hint">Conversation will appear here.</div></div>
+    <div id="composer">
+      <div id="thumbs"></div>
+      <div id="compose-row">
+        <button class="icon" id="attach" title="Add pictures" aria-label="Add pictures">📎</button>
+        <input id="text" type="text" placeholder="Type to Jarvis, or paste a picture…" autocomplete="off">
+        <button class="icon" id="send" title="Send" aria-label="Send">➤</button>
+        <input id="file" type="file" accept="image/*" multiple>
+      </div>
+    </div>
   </section>
 </main>
 <script src="/eye.js"></script>
+<script src="/arc.js"></script>
 <script>
 (() => {
   const $ = (id) => document.getElementById(id);
   const log = $("log"), cards = $("cards");
+  const THEMES = ["eye", "arc"];
   const labels = {
     idle: ["tap to talk", "Say “Hey Jarvis” or tap"],
     listening: ["listening…", "Go ahead — tap again when done"],
@@ -86,10 +163,24 @@
     thinking: ["thinking…", ""],
     speaking: ["speaking", "Tap to interrupt"],
   };
-  let ws, current = null, terminalState = "idle", brainState = "idle";
+  let ws, current = null, terminalState = "idle", brainState = "idle", connected = false;
 
-  let connected = false;
+  // ---------- themes ----------
+  function applyTheme(name) {
+    if (!THEMES.includes(name)) name = "eye";
+    document.body.dataset.theme = name;
+    try { localStorage.setItem("jarvis-theme", name); } catch (e) {}
+    JarvisArc.active(name === "arc");
+    log.scrollTop = log.scrollHeight;
+  }
+  try { applyTheme(localStorage.getItem("jarvis-theme") || "eye"); } catch (e) { applyTheme("eye"); }
+  $("theme-btn").onclick = () => {
+    const next = THEMES[(THEMES.indexOf(document.body.dataset.theme) + 1) % THEMES.length];
+    applyTheme(next);
+    send({action: "theme", theme: next});   // the brain switches voice to match
+  };
 
+  // ---------- state ----------
   function render() {
     const s = terminalState === "listening" ? "listening"
             : (brainState === "thinking" || brainState === "speaking") ? brainState
@@ -97,14 +188,22 @@
     document.body.dataset.state = s;
     $("sub").textContent = labels[s][0];
     $("status").textContent = labels[s][1];
-    JarvisEye.mood(connected ? s : "offline");
+    const mood = connected ? s : "offline";
+    JarvisEye.mood(mood);
+    JarvisArc.mood(mood);
+    $("arc-status").textContent = connected ? (s === "idle" ? "" : labels[s][0]) : "offline";
+    $("arc-status").classList.toggle("down", !connected);
   }
 
-  function bubble(cls, text) {
+  // ---------- conversation ----------
+  function bubble(cls, text, images) {
     $("hint")?.remove();
     const el = document.createElement("div");
     el.className = "msg " + cls;
-    el.textContent = text;
+    for (const src of images || []) {
+      const img = document.createElement("img"); img.src = src; el.appendChild(img);
+    }
+    el.appendChild(document.createTextNode(text));
     log.appendChild(el);
     while (log.children.length > 60) log.firstChild.remove();
     log.scrollTop = log.scrollHeight;
@@ -126,7 +225,9 @@
         b.onclick = () => { send({action: "decision", card_id: c.card_id, decision}); el.remove(); };
         row.appendChild(b);
       }
-      el.appendChild(row);
+      const say = document.createElement("div"); say.className = "say";
+      say.textContent = "…or just say “approve”";
+      el.append(row, say);
     } else {
       setTimeout(() => el.remove(), 15000);
     }
@@ -146,17 +247,21 @@
           $("conn").classList.toggle("down", !m.connected);
           render();
           break;
-        case "eye": JarvisEye.track(m); break;
+        case "eye": JarvisEye.track(m); JarvisArc.track(m); break;
+        case "voice_level": JarvisArc.level(m.level); break;
+        case "emote": JarvisArc.emote(m.emotion); break;
+        case "set_theme": applyTheme(m.theme); break;
         case "terminal_state": terminalState = m.state; render(); break;
         case "state": brainState = m.state; render(); break;
         case "transcript": bubble("you", m.text); current = null; break;
         case "reply_text":
           if (m.done) { current = null; break; }
           if (!current) current = bubble("jarvis", "");
-          current.textContent += m.text;
+          current.lastChild.textContent += m.text;
           log.scrollTop = log.scrollHeight;
           break;
         case "card": showCard(m); break;
+        case "card_done": document.getElementById("card-" + m.card_id)?.remove(); break;
         case "error": bubble("err", m.message); break;
       }
     };
@@ -168,6 +273,59 @@
   }
 
   $("talk").addEventListener("click", () => send({action: "talk"}));
+  $("arc").addEventListener("click", () => send({action: "talk"}));
+
+  // ---------- typing and pictures ----------
+  const MAX_SIDE = 1568;     // Claude's recommended largest side; keeps messages small
+  let pending = [];          // [{media_type, data, url}]
+
+  async function addPicture(file) {
+    if (!file || !file.type.startsWith("image/") || pending.length >= 5) return;
+    const bmp = await createImageBitmap(file);
+    const k = Math.min(1, MAX_SIDE / Math.max(bmp.width, bmp.height));
+    const c = document.createElement("canvas");
+    c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
+    c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
+    const url = c.toDataURL("image/jpeg", 0.85);
+    pending.push({media_type: "image/jpeg", data: url.split(",")[1], url});
+    drawThumbs();
+  }
+  function drawThumbs() {
+    const box = $("thumbs"); box.innerHTML = "";
+    pending.forEach((p, i) => {
+      const t = document.createElement("div"); t.className = "t";
+      const img = document.createElement("img"); img.src = p.url;
+      const x = document.createElement("button"); x.className = "x"; x.textContent = "✕";
+      x.onclick = () => { pending.splice(i, 1); drawThumbs(); };
+      t.append(img, x); box.appendChild(t);
+    });
+  }
+  function submit() {
+    const text = $("text").value.trim();
+    if (!text && !pending.length) return;
+    bubble("you", text, pending.map((p) => p.url));
+    current = null;
+    send({action: "say", text, images: pending.map(({media_type, data}) => ({media_type, data}))});
+    $("text").value = ""; pending = []; drawThumbs();
+  }
+  $("send").onclick = submit;
+  $("text").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); submit(); } });
+  $("attach").onclick = () => $("file").click();
+  $("file").onchange = async (e) => { for (const f of e.target.files) await addPicture(f); e.target.value = ""; };
+  document.addEventListener("paste", async (e) => {
+    for (const item of e.clipboardData?.items || []) {
+      if (item.type.startsWith("image/")) { e.preventDefault(); await addPicture(item.getAsFile()); }
+    }
+  });
+  let dragDepth = 0;
+  document.addEventListener("dragenter", (e) => { e.preventDefault(); dragDepth++; document.body.classList.add("dragging"); });
+  document.addEventListener("dragleave", () => { if (--dragDepth <= 0) { dragDepth = 0; document.body.classList.remove("dragging"); } });
+  document.addEventListener("dragover", (e) => e.preventDefault());
+  document.addEventListener("drop", async (e) => {
+    e.preventDefault(); dragDepth = 0; document.body.classList.remove("dragging");
+    for (const f of e.dataTransfer?.files || []) await addPicture(f);
+  });
+
   render(); connect();
 })();
 </script>

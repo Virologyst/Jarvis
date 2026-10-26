@@ -11,6 +11,8 @@ from collections.abc import Awaitable, Callable
 
 from jarvis_protocol import Card
 
+from .themes import THEMES, describe
+
 log = logging.getLogger(__name__)
 
 
@@ -49,24 +51,52 @@ TOOLS = [
         "input_schema": _schema(),
         "strict": True,
     },
+    {
+        "name": "list_themes",
+        "description": "The screen themes available on this terminal, and which one is showing.",
+        "input_schema": _schema(),
+        "strict": True,
+    },
+    {
+        "name": "set_theme",
+        "description": ("Switch this terminal's screen theme (each theme has its own look and "
+                        "voice), when asked, e.g. 'switch to the eye theme'."),
+        "input_schema": _schema(
+            {"theme": {"type": "string", "enum": list(THEMES),
+                       "description": "; ".join(f"{t.name} = {t.title}" for t in THEMES.values())}},
+            ["theme"]),
+        "strict": True,
+    },
 ]
 
 
 class ToolBox:
     """Runs tool calls for one terminal's conversation; shows any cards on that terminal."""
 
-    def __init__(self, upgrades, show_card: Callable[[Card], Awaitable[None]]):
+    def __init__(self, upgrades, show_card: Callable[[Card], Awaitable[None]],
+                 current_theme: Callable[[], str] | None = None,
+                 set_theme: Callable[[str], Awaitable[str]] | None = None):
         self.upgrades = upgrades
         self.show_card = show_card
+        self.current_theme = current_theme
+        self.set_theme = set_theme
 
     async def run(self, name: str, args: dict) -> str:
         log.info("tool %s %s", name, args)
+        card = None
         if name == "request_self_upgrade":
             text, card = self.upgrades.request(str(args.get("task", "")))
         elif name == "upgrade_status":
-            text, card = self.upgrades.status(), None
+            text = self.upgrades.status()
         elif name == "undo_last_upgrade":
             text, card = self.upgrades.request_undo()
+        elif name == "list_themes":
+            now = self.current_theme() if self.current_theme else "unknown"
+            text = f"Showing now: {now}. Available: {describe()}"
+        elif name == "set_theme":
+            if not self.set_theme:
+                raise RuntimeError("themes aren't available here")
+            text = await self.set_theme(str(args.get("theme", "")))
         else:
             raise ValueError(f"unknown tool {name}")
         if card:
