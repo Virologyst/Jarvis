@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 
 import aiohttp
+import numpy as np
 from aiohttp import WSMsgType, web
 
 from jarvis_protocol import (
@@ -31,7 +32,11 @@ log = logging.getLogger(__name__)
 UI_DIR = Path(__file__).resolve().parents[2] / "ui"
 
 FRAME_S = 0.08
-SILENCE_TO_END_S = 0.9     # stop listening after this much quiet following speech
+# Stop listening after this much non-speech following speech. People pause mid-sentence
+# ("I'm just testing a... new microphone"), so this needs to be over a second.
+SILENCE_TO_END_S = float(os.environ.get("JARVIS_END_SILENCE_S", "1.3"))
+# Silero voice detector score (0..1) that counts as speech
+VAD_THRESHOLD = float(os.environ.get("JARVIS_VAD_THRESHOLD", "0.5"))
 NO_SPEECH_CANCEL_S = 6.0   # give up if nothing is said after waking
 MAX_LISTEN_S = 25.0
 # After Jarvis answers, keep listening this long for a follow-up without "hey Jarvis" (0 = off)
@@ -40,6 +45,18 @@ FOLLOW_UP_S = float(os.environ.get("JARVIS_FOLLOW_UP_S", "6"))
 # ~100-700 for normal speech, so keep this low; raise it for noisy rooms.
 MIN_SPEECH_RMS = float(os.environ.get("JARVIS_SPEECH_RMS", "120"))
 EYE_HZ = 20                # how often the eye's tracking state goes to the page
+
+
+def _load_vad():
+    """Silero voice activity detector (ships with openWakeWord). None if unavailable."""
+    try:
+        from openwakeword.vad import VAD
+        vad = VAD()
+        log.info("voice detector ready (Silero VAD)")
+        return vad
+    except Exception as e:
+        log.warning("no voice detector (%s); falling back to mic volume to tell when you stop", e)
+        return None
 
 
 class Terminal:
@@ -58,6 +75,7 @@ class Terminal:
         self.brain_ws: aiohttp.ClientWebSocketResponse | None = None
         self.ui_sockets: set[web.WebSocketResponse] = set()
         self.player = Player(speaker_device)
+        self.vad = _load_vad()
         self.noise_floor = 100.0
         self._listen = {"started": 0.0, "speech": False, "last_voice": 0.0,
                         "no_speech_s": NO_SPEECH_CANCEL_S}
@@ -93,6 +111,8 @@ class Terminal:
         now = time.monotonic()
         self._listen = {"started": now, "speech": False, "last_voice": now, "no_speech_s": no_speech_s}
         self._replied = False
+        if self.vad:
+            self.vad.reset_states()
         await self.set_state("listening")
         log.info("listening (%s)", reason)
 
@@ -156,8 +176,14 @@ class Terminal:
             return
         await self.brain_ws.send_bytes(frame)
         now = time.monotonic()
-        threshold = max(MIN_SPEECH_RMS, self.noise_floor * 3)
-        if level >= threshold:
+        if self.vad:
+            # A voice detector copes with quiet syllables and mid-sentence pauses far better
+            # than mic volume, and ignores fans and keyboard clatter
+            pcm = np.frombuffer(frame, dtype=np.int16)
+            is_voice = float(self.vad.predict(pcm, frame_size=640)) >= VAD_THRESHOLD
+        else:
+            is_voice = level >= max(MIN_SPEECH_RMS, self.noise_floor * 3)
+        if is_voice:
             self._listen["speech"] = True
             self._listen["last_voice"] = now
         elapsed = now - self._listen["started"]
