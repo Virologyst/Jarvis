@@ -6,7 +6,8 @@ Turn pipeline (all streamed so Jarvis starts talking quickly):
 
 Each sentence starts with a mood tag ([amused] ...) that becomes an Emote message timed to its
 audio; tags are stripped from everything shown or spoken. A short spoken "approve"/"reject" is
-handled here in code and never reaches Claude.
+handled here in code and never reaches Claude, and so is switching permanent listening on or
+off ("listen to me from now on" / "stop listening"); while it's on, noise and scraps are dropped.
 """
 
 from __future__ import annotations
@@ -23,13 +24,14 @@ from aiohttp import WSMsgType, web
 
 from jarvis_protocol import (
     AudioEnd, AudioStart, Card, CardDone, Decision, Emote, Error, Hello, ListenCancel, ListenEnd,
-    ListenStart, ReplyText, SetTheme, State, Transcript, UserInput, WakeCheck, WakeResult,
+    ListenMode, ListenStart, ReplyText, SetTheme, State, Transcript, UserInput, WakeCheck, WakeResult,
     Welcome, decode, encode,
 )
 
 from .approvals import ApprovalGate
 from .config import REPO_ROOT, Settings
 from .emotions import TagStripper, parse_sentence
+from .listenmode import addressed, is_noise, listen_mode_command
 from .llm import Conversation
 from .selfupgrade import UpgradeManager, take_rollback_note
 from .sentences import SentenceSplitter
@@ -99,6 +101,8 @@ class TerminalSession:
         self.conversation = Conversation(brain.client, s.model, s.effort, s.idle_reset_minutes,
                                          tools=TOOLS, run_tool=tools.run)
         self.listening = False
+        self.listen_reason = ""
+        self.always_listening = False   # permanent listening, per terminal; off at startup
         self.audio = bytearray()
         self.turn: asyncio.Task | None = None
 
@@ -112,6 +116,15 @@ class TerminalSession:
         log.info("[%s] theme -> %s", self.terminal_id, theme.name)
         voice = " It has its own voice, so you'll hear a change." if theme.voice else ""
         return f"Switched this screen to the {theme.title} theme.{voice}"
+
+    async def set_listen_mode(self, on: bool) -> str:
+        """Permanent listening on/off for this terminal. Returns the spoken confirmation."""
+        self.always_listening = on
+        await self.send(ListenMode(on))
+        log.info("[%s] permanent listening %s", self.terminal_id, "on" if on else "off")
+        if on:
+            return "[neutral] Very well, Sir. I'm listening until you tell me to stop."
+        return "[neutral] Understood, Sir. I'll wait for my name again."
 
     async def send(self, msg) -> None:
         if not self.ws.closed:
@@ -144,6 +157,7 @@ class TerminalSession:
         elif isinstance(msg, ListenStart):
             await self._cancel_turn()  # talking over Jarvis interrupts it
             self.listening, self.audio = True, bytearray()
+            self.listen_reason = msg.reason
             await self.send(State("listening"))
         elif isinstance(msg, ListenEnd):
             if self.listening:
@@ -165,6 +179,11 @@ class TerminalSession:
         elif isinstance(msg, SetTheme):
             with contextlib.suppress(ValueError):   # picked on the screen: switch, quietly
                 await self.set_theme(msg.theme)
+        elif isinstance(msg, ListenMode):
+            # The toggle on the screen (say so), or a reconnecting terminal (quietly)
+            said = await self.set_listen_mode(msg.on)
+            if not msg.quiet and not self.busy:
+                asyncio.create_task(self.speak_aside(said))
 
     def on_audio(self, data: bytes) -> None:
         if self.listening and len(self.audio) < MAX_UTTERANCE_S * 16_000 * 2:
@@ -190,14 +209,20 @@ class TerminalSession:
             await self.send(AudioEnd())
 
     async def _run_turn(self, pcm: bytes) -> None:
+        # Opened by permanent listening (any voice), not by "hey Jarvis" or a tap
+        ambient = self.listen_reason == "permanent"
+
         async def spoken():
             await self.send(State("thinking"))
             text = await asyncio.to_thread(self.brain.stt.transcribe, pcm)
             log.info("[%s] heard: %r", self.terminal_id, text)
             if not text:
                 return
+            if ambient and listen_mode_command(text) is None and is_noise(text):
+                log.info("[%s] ignored as noise: %r", self.terminal_id, text)
+                return
             await self.send(Transcript(text))
-            if await self._voice_command(text):
+            if await self._voice_command(text, ambient):
                 return
             await self._speak_stream(self.conversation.reply(text))
         await self._guarded(spoken())
@@ -220,11 +245,21 @@ class TerminalSession:
             await self._speak_stream(self.conversation.reply(content))
         await self._guarded(typed())
 
-    async def _voice_command(self, text: str) -> bool:
-        """'Approve' / 'reject' by voice: decided here in code, for the newest waiting card."""
+    async def _voice_command(self, text: str, ambient: bool = False) -> bool:
+        """Spoken switches, decided here in code: permanent listening on/off, and 'approve' /
+        'reject' for the newest waiting card."""
+        mode = listen_mode_command(text)
+        if mode is not None:
+            await self._speak_text(await self.set_listen_mode(mode))
+            return True
         decision = voice_decision(text)
         if not decision:
             return False
+        if ambient and not addressed(text):
+            # With the mic always open, a stray "approve" from across the room mustn't count
+            await self._speak_text('[neutral] While I\'m always listening, please say "Jarvis, '
+                                   'approve", or tap the card, Sir.')
+            return True
         pending = self.brain.approvals.pending()
         if not pending:
             await self._speak_text("[neutral] There's nothing waiting for approval, Sir.")

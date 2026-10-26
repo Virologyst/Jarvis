@@ -4,6 +4,10 @@ Local states:
   idle       listening for "hey Jarvis" (or a button tap)
   listening  streaming the mic to the brain until you stop talking
   waiting    brain is thinking or speaking; mic ignored (no echo of Jarvis's voice)
+
+Permanent listening (switched by voice through the brain, or the toggle on the screen): while
+idle, any clear voice starts listening instead of "hey Jarvis". It still needs a run of voiced
+frames, and never triggers while Jarvis is speaking or just after, so it doesn't hear itself.
 """
 
 from __future__ import annotations
@@ -23,7 +27,7 @@ import numpy as np
 from aiohttp import WSMsgType, web
 
 from jarvis_protocol import (
-    AudioEnd, AudioStart, Decision, Emote, Hello, ListenCancel, ListenEnd, ListenStart,
+    AudioEnd, AudioStart, Decision, Emote, Hello, ListenCancel, ListenEnd, ListenMode, ListenStart,
     SetTheme, State, UserInput, WakeCheck, WakeResult, decode, encode,
 )
 
@@ -57,6 +61,12 @@ PREROLL_S = 3.5
 # (0.02: tested on synthetic voices, ordinary sentences stay at ~0.00-0.01)
 WAKE_CANDIDATE = float(os.environ.get("JARVIS_WAKE_CANDIDATE", "0.02"))
 WAKE_CHECK_MAX_AGE_S = 3.0  # ignore a brain "yes" that arrives later than this
+# Permanent listening: this many voiced frames in a row open the mic (0.24 s; a cough or a
+# door is shorter), sending this much audio from just before so the first word isn't lost
+ONSET_FRAMES = int(os.environ.get("JARVIS_ONSET_FRAMES", "3"))
+ONSET_PREROLL_S = 1.0
+# ...and nothing opens it while Jarvis is speaking or for this long after (its own voice)
+ECHO_GUARD_S = float(os.environ.get("JARVIS_ECHO_GUARD_S", "0.8"))
 
 
 def _load_vad():
@@ -95,6 +105,9 @@ class Terminal:
         self._listen = {"started": 0.0, "speech": False, "last_voice": 0.0,
                         "no_speech_s": NO_SPEECH_CANCEL_S}
         self._replied = False
+        self.always_listening = False   # permanent listening; off at startup
+        self._onset = 0                 # voiced frames in a row while idle
+        self._quiet_until = 0.0         # echo guard: ignore voices until then
 
     # ---- outputs -------------------------------------------------------
 
@@ -120,7 +133,7 @@ class Terminal:
     # ---- talking -------------------------------------------------------
 
     async def start_listening(self, reason: str, no_speech_s: float = NO_SPEECH_CANCEL_S,
-                              with_preroll: bool = False) -> None:
+                              with_preroll: bool = False, preroll_s: float = PREROLL_S) -> None:
         self.player.clear()  # tapping while Jarvis talks interrupts it
         self._wake_check = None
         if not await self.to_brain(ListenStart(reason)):
@@ -130,7 +143,7 @@ class Terminal:
         if with_preroll and self.preroll:
             # Send the wake phrase too. It counts as speech, so a bare "Good morning Jarvis"
             # ends after the usual pause and gets a reply instead of waiting for more.
-            for frame in self.preroll:
+            for frame in list(self.preroll)[-max(1, int(preroll_s / FRAME_S)):]:
                 await self.brain_ws.send_bytes(frame)
             self._listen["speech"] = True
         self.preroll.clear()
@@ -215,12 +228,53 @@ class Terminal:
             if self.state == "listening":
                 await self.stop_listening(cancel=True)
 
+    def _is_voice(self, frame: bytes, level: float) -> bool:
+        if self.vad:
+            # A voice detector copes with quiet syllables and mid-sentence pauses far better
+            # than mic volume, and ignores fans and keyboard clatter
+            pcm = np.frombuffer(frame, dtype=np.int16)
+            return float(self.vad.predict(pcm, frame_size=640)) >= VAD_THRESHOLD
+        return level >= max(MIN_SPEECH_RMS, self.noise_floor * 3)
+
+    def _voice_onset(self, frame: bytes, level: float) -> bool:
+        """Permanent listening, while idle: has someone clearly started talking?"""
+        now = time.monotonic()
+        if self.player.busy:
+            self._quiet_until = now + ECHO_GUARD_S   # Jarvis talking (e.g. an announcement)
+        if now < self._quiet_until:
+            self._onset = 0
+            return False
+        # Voice-like and loud enough: distant chatter and a quiet radio stay below the floor
+        if self._is_voice(frame, level) and level >= MIN_SPEECH_RMS:
+            self._onset += 1
+        else:
+            self._onset = 0
+        return self._onset >= ONSET_FRAMES
+
+    def set_always_listening(self, on: bool) -> None:
+        """The brain switched permanent listening for this terminal."""
+        if on == self.always_listening:
+            return
+        self.always_listening = on
+        self._onset = 0
+        self._quiet_until = time.monotonic() + ECHO_GUARD_S
+        if self.wake:
+            self.wake.reset()
+        if self.vad:
+            self.vad.reset_states()
+        log.info("permanent listening %s", "on" if on else "off")
+
     async def _on_frame(self, frame: bytes) -> None:
         level = rms(frame)
         if self.state == "idle":
             self.noise_floor = 0.95 * self.noise_floor + 0.05 * level
             self.preroll.append(frame)
-            if self.wake and self.brain_ws:
+            if self.always_listening:
+                if self.brain_ws and self._voice_onset(frame, level):
+                    self._onset = 0
+                    await self.start_listening("permanent", with_preroll=True,
+                                               preroll_s=ONSET_PREROLL_S)
+            elif self.wake and self.brain_ws:
                 heard = self.wake.check(frame)
                 if heard == WAKE:
                     await self.start_listening("wake", with_preroll=True)
@@ -232,7 +286,11 @@ class Terminal:
             await self._listening_frame(frame, level)
         elif self.state == "waiting":
             if self.brain_state == "idle" and not self.player.busy:
-                if FOLLOW_UP_S > 0 and self.brain_ws and self._replied:
+                if self.always_listening:
+                    # Already listening for anything: just don't hear the end of the reply
+                    self._quiet_until = time.monotonic() + ECHO_GUARD_S
+                    await self.set_state("idle")
+                elif FOLLOW_UP_S > 0 and self.brain_ws and self._replied:
                     # Jarvis just answered: carry on the conversation without the wake word.
                     # If nothing is said in time it cancels back to idle (no chain).
                     await self.start_listening("follow_up", no_speech_s=FOLLOW_UP_S)
@@ -247,14 +305,7 @@ class Terminal:
             return
         await self.brain_ws.send_bytes(frame)
         now = time.monotonic()
-        if self.vad:
-            # A voice detector copes with quiet syllables and mid-sentence pauses far better
-            # than mic volume, and ignores fans and keyboard clatter
-            pcm = np.frombuffer(frame, dtype=np.int16)
-            is_voice = float(self.vad.predict(pcm, frame_size=640)) >= VAD_THRESHOLD
-        else:
-            is_voice = level >= max(MIN_SPEECH_RMS, self.noise_floor * 3)
-        if is_voice:
+        if self._is_voice(frame, level):
             self._listen["speech"] = True
             self._listen["last_voice"] = now
         elapsed = now - self._listen["started"]
@@ -277,6 +328,8 @@ class Terminal:
                         self.brain_ws = ws
                         delay = 1.0
                         await ws.send_str(encode(Hello(self.terminal_id)))
+                        if self.always_listening:   # the brain restarted: carry on, quietly
+                            await ws.send_str(encode(ListenMode(True, quiet=True)))
                         await self.to_ui({"type": "connection", "connected": True})
                         log.info("connected to brain at %s", self.brain_url)
                         async for msg in ws:
@@ -316,6 +369,8 @@ class Terminal:
             self.brain_state = msg.state
         elif isinstance(msg, SetTheme):
             self.theme = msg.theme   # remembered for pages that connect later
+        elif isinstance(msg, ListenMode):
+            self.set_always_listening(msg.on)
         await self.to_ui(json.loads(raw))  # the page shows everything the brain says
 
     # ---- touchscreen page ---------------------------------------------
@@ -328,6 +383,7 @@ class Terminal:
         await ws.send_str(json.dumps({"type": "terminal_state", "state": self.state}))
         if self.theme:
             await ws.send_str(json.dumps({"type": "set_theme", "theme": self.theme}))
+        await ws.send_str(json.dumps({"type": "listen_mode", "on": self.always_listening}))
         try:
             async for msg in ws:
                 if msg.type != WSMsgType.TEXT:
@@ -349,6 +405,9 @@ class Terminal:
                         await self.set_state("waiting")
                 elif action.get("action") == "theme":
                     await self.to_brain(SetTheme(str(action.get("theme", ""))))
+                elif action.get("action") == "listen_mode":
+                    # The toggle: the brain switches it, says so, and tells us (ListenMode)
+                    await self.to_brain(ListenMode(bool(action.get("on", not self.always_listening))))
         finally:
             self.ui_sockets.discard(ws)
         return ws

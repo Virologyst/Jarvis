@@ -39,6 +39,15 @@ idle again once playback drains           State(idle)
 - Half-duplex for now: the mic is ignored while Jarvis thinks/speaks (no echo loops).
   True barge-in by voice needs echo cancellation — the speakerphone provides it; enable later.
 
+### Permanent listening
+"Listen to me from now on" / "stop listening" (or the pill-shaped toggle at the top right of the
+screen) switches a terminal into answering anything said to it, no wake word. The brain
+recognises the phrases in code (`listenmode.py`), confirms out loud, and sends `ListenMode` to
+that terminal only. While it's on, the idle terminal opens the mic after ~0.24 s of clear voice
+(`JARVIS_ONSET_FRAMES`), never while Jarvis is speaking or for `JARVIS_ECHO_GUARD_S` after; the
+brain drops one-word scraps and speech-to-text's noise phantoms ("Thank you."), and spoken
+approve/reject needs the name ("Jarvis, approve"). Off at startup; kept across a brain restart.
+
 ## Protocol
 `protocol/jarvis_protocol/messages.py`. One WebSocket per terminal at `ws://<brain>:8765/ws`.
 JSON text frames for control; binary frames are 16-bit mono PCM (mic: 16 kHz; speech: rate
