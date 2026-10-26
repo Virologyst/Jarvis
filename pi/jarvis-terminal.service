@@ -1,0 +1,16 @@
+# systemd user service for a Jarvis terminal. Installed by pi/install.sh to
+# ~/.config/systemd/user/jarvis-terminal.service
+# A user service (not system) so it shares the desktop session's audio (PipeWire).
+[Unit]
+Description=Jarvis terminal (wake word, mic, speaker, touchscreen page)
+After=network-online.target pipewire.service
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=%h/Jarvis
+ExecStart=%h/Jarvis/.venv/bin/python -m jarvis_terminal --no-keyboard --ui-port 8080
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

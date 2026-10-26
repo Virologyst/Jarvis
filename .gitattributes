@@ -1,0 +1,8 @@
+# Files that run on the Pi must keep Linux line endings
+*.sh text eol=lf
+*.service text eol=lf
+*.desktop text eol=lf
+*.py text eol=lf
+*.toml text eol=lf
+# PowerShell scripts stay Windows-friendly
+*.ps1 text eol=crlf

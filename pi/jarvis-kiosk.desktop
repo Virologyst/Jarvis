@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Jarvis kiosk
+Comment=Full-screen Jarvis touchscreen page
+Exec=@KIOSK@
+X-GNOME-Autostart-enabled=true

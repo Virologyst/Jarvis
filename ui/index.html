@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Jarvis</title>
+<style>
+  :root {
+    --bg: #0b0f14; --panel: #131a22; --text: #e6edf3; --muted: #7d8a99;
+    --accent: #3fb6ff; --listen: #3ddc97; --think: #f5b942; --speak: #3fb6ff;
+    --danger: #ff6b6b; --border: #223040;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 18px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; overflow: hidden;
+    user-select: none; -webkit-user-select: none; }
+  main { display: grid; grid-template-columns: minmax(280px, 40%) 1fr; height: 100%; }
+  @media (max-width: 700px) { main { grid-template-columns: 1fr; grid-template-rows: auto 1fr; } }
+
+  .left { display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 24px; padding: 24px; }
+  #talk { width: min(60vmin, 320px); aspect-ratio: 1; border-radius: 50%; border: 0;
+    background: radial-gradient(circle at 50% 40%, #1d2a38, #0e151d); color: var(--text);
+    font-size: 28px; letter-spacing: .12em; cursor: pointer; position: relative;
+    box-shadow: 0 0 0 6px var(--border), 0 0 40px rgba(63,182,255,.15);
+    transition: box-shadow .25s, transform .08s; touch-action: manipulation; }
+  #talk:active { transform: scale(.97); }
+  #talk .sub { display: block; font-size: 14px; letter-spacing: .05em; color: var(--muted); margin-top: 8px; }
+  body[data-state="listening"] #talk { box-shadow: 0 0 0 6px var(--listen), 0 0 60px rgba(61,220,151,.45); animation: pulse 1.2s infinite; }
+  body[data-state="thinking"] #talk { box-shadow: 0 0 0 6px var(--think), 0 0 50px rgba(245,185,66,.35); }
+  body[data-state="speaking"] #talk { box-shadow: 0 0 0 6px var(--speak), 0 0 60px rgba(63,182,255,.45); animation: pulse 1.6s infinite; }
+  @keyframes pulse { 50% { transform: scale(1.03); } }
+
+  #status { color: var(--muted); font-size: 16px; min-height: 1.4em; text-align: center; }
+  #conn { font-size: 13px; color: var(--muted); }
+  #conn.down { color: var(--danger); }
+
+  .right { display: flex; flex-direction: column; min-height: 0; padding: 24px 24px 24px 0; gap: 16px; }
+  @media (max-width: 700px) { .right { padding: 0 16px 16px; } }
+  #cards:empty { display: none; }
+  #cards { display: flex; flex-direction: column; gap: 12px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-left: 4px solid var(--think);
+    border-radius: 12px; padding: 14px 16px; }
+  .card h3 { margin: 0 0 6px; font-size: 18px; }
+  .card p { margin: 0 0 12px; color: var(--muted); white-space: pre-wrap; }
+  .card .actions { display: flex; gap: 10px; }
+  .card button { flex: 1; min-height: 52px; border-radius: 10px; border: 1px solid var(--border);
+    background: #1b2733; color: var(--text); font-size: 18px; touch-action: manipulation; }
+  .card button.approve { background: #16402d; border-color: var(--listen); }
+  .card button.reject { background: #3a1c1f; border-color: var(--danger); }
+
+  #log { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 10px;
+    padding-right: 4px; scroll-behavior: smooth; }
+  .msg { max-width: 85%; padding: 10px 14px; border-radius: 14px; white-space: pre-wrap; }
+  .msg.you { align-self: flex-end; background: #1d3347; }
+  .msg.jarvis { align-self: flex-start; background: var(--panel); border: 1px solid var(--border); }
+  .msg.err { align-self: center; color: var(--danger); font-size: 14px; background: none; }
+  .hint { color: var(--muted); text-align: center; margin: auto; }
+</style>
+</head>
+<body data-state="idle">
+<main>
+  <section class="left">
+    <button id="talk" aria-label="Talk to Jarvis">JARVIS<span class="sub" id="sub">tap to talk</span></button>
+    <div id="status">Say “Hey Jarvis” or tap</div>
+    <div id="conn">connecting…</div>
+  </section>
+  <section class="right">
+    <div id="cards"></div>
+    <div id="log"><div class="hint" id="hint">Conversation will appear here.</div></div>
+  </section>
+</main>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const log = $("log"), cards = $("cards");
+  const labels = {
+    idle: ["tap to talk", "Say “Hey Jarvis” or tap"],
+    listening: ["listening…", "Go ahead — tap again when done"],
+    waiting: ["…", ""],
+    thinking: ["thinking…", ""],
+    speaking: ["speaking", "Tap to interrupt"],
+  };
+  let ws, current = null, terminalState = "idle", brainState = "idle";
+
+  function render() {
+    const s = terminalState === "listening" ? "listening"
+            : (brainState === "thinking" || brainState === "speaking") ? brainState
+            : terminalState === "waiting" ? "thinking" : "idle";
+    document.body.dataset.state = s;
+    $("sub").textContent = labels[s][0];
+    $("status").textContent = labels[s][1];
+  }
+
+  function bubble(cls, text) {
+    $("hint")?.remove();
+    const el = document.createElement("div");
+    el.className = "msg " + cls;
+    el.textContent = text;
+    log.appendChild(el);
+    while (log.children.length > 60) log.firstChild.remove();
+    log.scrollTop = log.scrollHeight;
+    return el;
+  }
+
+  function showCard(c) {
+    if (document.getElementById("card-" + c.card_id)) return;
+    const el = document.createElement("div");
+    el.className = "card"; el.id = "card-" + c.card_id;
+    const h = document.createElement("h3"); h.textContent = c.title;
+    const p = document.createElement("p"); p.textContent = c.body || "";
+    el.append(h, p);
+    if (c.kind === "approval") {
+      const row = document.createElement("div"); row.className = "actions";
+      for (const [label, decision, cls] of [["Approve", "approve", "approve"], ["Reject", "reject", "reject"]]) {
+        const b = document.createElement("button");
+        b.textContent = label; b.className = cls;
+        b.onclick = () => { send({action: "decision", card_id: c.card_id, decision}); el.remove(); };
+        row.appendChild(b);
+      }
+      el.appendChild(row);
+    } else {
+      setTimeout(() => el.remove(), 15000);
+    }
+    cards.prepend(el);
+  }
+
+  function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
+
+  function connect() {
+    ws = new WebSocket(`ws://${location.host}/events`);
+    ws.onmessage = (ev) => {
+      const m = JSON.parse(ev.data);
+      switch (m.type) {
+        case "connection":
+          $("conn").textContent = m.connected ? "connected" : "brain offline — retrying";
+          $("conn").classList.toggle("down", !m.connected);
+          break;
+        case "terminal_state": terminalState = m.state; render(); break;
+        case "state": brainState = m.state; render(); break;
+        case "transcript": bubble("you", m.text); current = null; break;
+        case "reply_text":
+          if (m.done) { current = null; break; }
+          if (!current) current = bubble("jarvis", "");
+          current.textContent += m.text;
+          log.scrollTop = log.scrollHeight;
+          break;
+        case "card": showCard(m); break;
+        case "error": bubble("err", m.message); break;
+      }
+    };
+    ws.onclose = () => {
+      $("conn").textContent = "terminal offline — retrying"; $("conn").classList.add("down");
+      setTimeout(connect, 1500);
+    };
+  }
+
+  $("talk").addEventListener("click", () => send({action: "talk"}));
+  render(); connect();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jarvis-terminal"
+version = "0.1.0"
+description = "Jarvis terminal: wake word, mic, speaker and touchscreen page"
+requires-python = ">=3.11"
+# Deliberately light so it runs on a Pi 5: no GPU, no Claude SDK.
+# jarvis-protocol is installed from ../protocol by the install scripts.
+dependencies = [
+    "aiohttp>=3.9",
+    "numpy",
+    "sounddevice",
+    "openwakeword>=0.6",
+]
+
+[project.scripts]
+jarvis-terminal = "jarvis_terminal.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["jarvis_terminal*"]

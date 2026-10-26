@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+
+# Secrets and local config
+.env
+*.env.local
+
+# Downloaded models and voices (large, fetched by setup scripts)
+models/
+voices/
+*.onnx
+*.onnx.json
+
+# Runtime data
+logs/
+data/
+
+# Editors / OS
+.idea/
+.vscode/
+Thumbs.db
+.DS_Store
