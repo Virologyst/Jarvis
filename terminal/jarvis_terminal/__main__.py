@@ -8,8 +8,11 @@ import logging
 import os
 import socket
 import sys
+from pathlib import Path
 
 from jarvis_protocol import load_env
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def main() -> None:
@@ -25,6 +28,11 @@ def main() -> None:
     p.add_argument("--mic", default=None, help="input device name or index (see --list-devices)")
     p.add_argument("--speaker", default=None, help="output device name or index")
     p.add_argument("--list-devices", action="store_true")
+    p.add_argument("--no-eye", action="store_true", help="don't look for a mic node on USB")
+    p.add_argument("--eye-sim", action="store_true", help="simulated mic node (no hardware)")
+    p.add_argument("--eye-config", type=Path,
+                   default=Path(os.environ.get("JARVIS_EYE_CONFIG", REPO_ROOT / "data" / "eye-nodes.json")),
+                   help="where node positions are saved")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args()
 
@@ -43,10 +51,15 @@ def main() -> None:
         return int(value) if value is not None and value.isdigit() else value
 
     from .client import Terminal
+    eye = None
+    if not args.no_eye:
+        from .eye import Eye
+        eye = Eye(args.eye_config, simulate=args.eye_sim)
     terminal = Terminal(
         brain_url=args.brain, terminal_id=args.id, ui_port=args.ui_port,
         wake_threshold=args.wake_threshold, use_wake=not args.no_wake,
         mic_device=device(args.mic), speaker_device=device(args.speaker),
+        eye=eye,
     )
     keyboard = not args.no_keyboard and sys.stdin is not None and sys.stdin.isatty()
     if keyboard:

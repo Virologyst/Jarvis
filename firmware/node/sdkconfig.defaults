@@ -1,0 +1,15 @@
+# Keep the bootloader quiet: its text shares the UART with our binary frames.
+CONFIG_BOOTLOADER_LOG_LEVEL_WARN=y
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# CPU at full speed for the DSP.
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# Run the main task with enough stack for config/NVS work.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=4096
+
+# Plain log text inside LOG frames, no ANSI colour codes.
+CONFIG_LOG_COLORS=n
+
+# The data link owns the native USB port; keep the IDF console off it.
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y

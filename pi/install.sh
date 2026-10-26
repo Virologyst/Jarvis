@@ -47,6 +47,8 @@ sed "s|@KIOSK@|$PI/kiosk.sh|" "$PI/jarvis-kiosk.desktop" > "$HOME/.config/autost
 echo "== checks"
 grep -rqs "^autologin-user=$USER" /etc/lightdm/ && echo "ok   desktop autologin" \
     || echo "WARN no desktop autologin: sudo raspi-config > System > Boot / Auto Login > Desktop Autologin"
+id -nG | grep -qw dialout && echo "ok   user can open the eye's mic node (dialout)" \
+    || echo "WARN user not in dialout: run 'sudo usermod -aG dialout $USER' and log out/in (needed for the eye)"
 pgrep -x swayidle >/dev/null && echo "WARN swayidle running: screen may blank (raspi-config > Display > Screen Blanking)" \
     || echo "ok   no screen blanking"
 "$REPO/.venv/bin/python" -m jarvis_terminal --list-devices | grep -qiE "usb|speak|jabra|anker|conference" \

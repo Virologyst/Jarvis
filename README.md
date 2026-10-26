@@ -17,8 +17,9 @@ touchscreen, talk normally, and Jarvis (Claude) answers out loud.
 |---|---|---|
 | `protocol/` | Message types shared by both sides (no dependencies) | everywhere |
 | `brain/` | The server: STT → Claude → TTS, tools, approvals | the brain PC |
-| `terminal/` | Wake word, mic, speaker, serves the touchscreen page | Pi 5, dev PC |
-| `ui/` | The touchscreen page (big Jarvis button, conversation, approval cards) | served by a terminal |
+| `terminal/` | Wake word, mic, speaker, the eye's mic node, serves the touchscreen page | Pi 5, dev PC |
+| `ui/` | The touchscreen page (the eye — tap it to talk — conversation, approval cards) | served by a terminal |
+| `firmware/` | ESP32-S3 mic node that tells the eye where sound is coming from ([docs/eye.md](docs/eye.md)) | the node |
 | `pi/` | Pi install, kiosk autostart, restart/stop helpers | Pi 5 |
 | `scripts/` | Dev-machine setup | dev PC |
 | `docs/` | [Architecture and decisions](docs/architecture.md) | |

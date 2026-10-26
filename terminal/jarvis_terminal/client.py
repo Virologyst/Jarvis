@@ -34,11 +34,14 @@ SILENCE_TO_END_S = 0.9     # stop listening after this much quiet following spee
 NO_SPEECH_CANCEL_S = 6.0   # give up if nothing is said after waking
 MAX_LISTEN_S = 25.0
 MIN_SPEECH_RMS = 350.0     # floor for "someone is talking" on a quiet mic
+EYE_HZ = 20                # how often the eye's tracking state goes to the page
 
 
 class Terminal:
     def __init__(self, brain_url: str, terminal_id: str, ui_port: int,
-                 wake_threshold: float, use_wake: bool, mic_device=None, speaker_device=None):
+                 wake_threshold: float, use_wake: bool, mic_device=None, speaker_device=None,
+                 eye=None):
+        self.eye = eye  # jarvis_terminal.eye.Eye, or None
         self.brain_url = brain_url
         self.terminal_id = terminal_id
         self.ui_port = ui_port
@@ -212,6 +215,15 @@ class Terminal:
         log.info("touchscreen page on http://localhost:%d", self.ui_port)
         return runner
 
+    async def eye_loop(self) -> None:
+        """Send the eye's tracking state to the page, and mute it while Jarvis is busy."""
+        self.eye.start()
+        while True:
+            self.eye.mute(self.state == "waiting" or self.player.busy)
+            if self.ui_sockets:
+                await self.to_ui({"type": "eye", **self.eye.snapshot()})
+            await asyncio.sleep(1 / EYE_HZ)
+
     async def keyboard_loop(self) -> None:
         """Press Enter in the console to talk (handy when developing)."""
         while True:
@@ -223,6 +235,8 @@ class Terminal:
         tasks = [asyncio.create_task(self.brain_loop()), asyncio.create_task(self.mic_loop())]
         if keyboard:
             tasks.append(asyncio.create_task(self.keyboard_loop()))
+        if self.eye:
+            tasks.append(asyncio.create_task(self.eye_loop()))
         try:
             await asyncio.gather(*tasks)
         finally:

@@ -14,6 +14,7 @@ dependencies = [
     "numpy",
     "sounddevice",
     "openwakeword>=0.6",
+    "pyserial>=3.5",   # the eye's mic node on USB
 ]
 
 [project.scripts]
