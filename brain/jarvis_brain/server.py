@@ -7,6 +7,7 @@ Turn pipeline (all streamed so Jarvis starts talking quickly):
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import logging
 import os
@@ -16,7 +17,7 @@ from aiohttp import WSMsgType, web
 
 from jarvis_protocol import (
     AudioEnd, AudioStart, Decision, Error, Hello, ListenCancel, ListenEnd,
-    ListenStart, ReplyText, State, Transcript, Welcome, decode, encode,
+    ListenStart, ReplyText, State, Transcript, WakeCheck, WakeResult, Welcome, decode, encode,
 )
 
 from .approvals import ApprovalGate
@@ -25,6 +26,7 @@ from .llm import Conversation
 from .sentences import SentenceSplitter
 from .stt import Transcriber
 from .tts import make_speaker
+from .wakecheck import heard_wake_phrase
 
 log = logging.getLogger(__name__)
 
@@ -87,6 +89,8 @@ class TerminalSession:
         elif isinstance(msg, ListenCancel):
             self.listening, self.audio = False, bytearray()
             await self.send(State("idle"))
+        elif isinstance(msg, WakeCheck):
+            asyncio.create_task(self._wake_check(msg))
         elif isinstance(msg, Decision):
             result = await self.brain.approvals.decide(msg.card_id, msg.decision)
             await self._speak_text(result)
@@ -94,6 +98,18 @@ class TerminalSession:
     def on_audio(self, data: bytes) -> None:
         if self.listening and len(self.audio) < MAX_UTTERANCE_S * 16_000 * 2:
             self.audio.extend(data)
+
+    async def _wake_check(self, msg: WakeCheck) -> None:
+        """Speech-to-text second opinion on a borderline wake word."""
+        try:
+            pcm = base64.b64decode(msg.audio_b64)
+            text = await asyncio.to_thread(self.brain.stt.transcribe, pcm)
+            ok = heard_wake_phrase(text)
+        except Exception as e:  # noqa: BLE001 - a failed check just means "not woken"
+            log.warning("wake check failed: %s", e)
+            text, ok = "", False
+        log.info("[%s] wake check: %r -> %s", self.terminal_id, text, "wake" if ok else "ignore")
+        await self.send(WakeResult(msg.check_id, ok, text))
 
     async def _cancel_turn(self) -> None:
         if self.turn and not self.turn.done():

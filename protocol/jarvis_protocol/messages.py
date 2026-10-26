@@ -13,7 +13,7 @@ from typing import Any
 __all__ = [
     "Hello", "Welcome", "ListenStart", "ListenEnd", "ListenCancel",
     "State", "Transcript", "ReplyText", "AudioStart", "AudioEnd",
-    "Card", "Decision", "Error", "encode", "decode",
+    "Card", "Decision", "Error", "WakeCheck", "WakeResult", "encode", "decode",
 ]
 
 _REGISTRY: dict[str, type] = {}
@@ -53,6 +53,17 @@ class ListenEnd:
 @dataclass
 class ListenCancel:
     """Drop the audio (false wake, nothing said)."""
+
+
+@_message("wake_check")
+@dataclass
+class WakeCheck:
+    """The wake model half-heard "...Jarvis": did one of the wake phrases get said?
+
+    audio_b64: the last few seconds of mic audio (16 kHz int16 PCM, base64).
+    """
+    check_id: str
+    audio_b64: str
 
 
 @_message("decision")
@@ -119,6 +130,15 @@ class Card:
     title: str
     body: str = ""
     data: dict[str, Any] = field(default_factory=dict)
+
+
+@_message("wake_result")
+@dataclass
+class WakeResult:
+    """Answer to a WakeCheck. text is what speech-to-text heard (for logs)."""
+    check_id: str
+    ok: bool
+    text: str = ""
 
 
 @_message("error")

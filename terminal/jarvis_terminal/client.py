@@ -9,7 +9,10 @@ Local states:
 from __future__ import annotations
 
 import asyncio
+import base64
+import collections
 import json
+import uuid
 import logging
 import os
 import time
@@ -21,11 +24,11 @@ from aiohttp import WSMsgType, web
 
 from jarvis_protocol import (
     AudioEnd, AudioStart, Decision, Hello, ListenCancel, ListenEnd, ListenStart,
-    State, decode, encode,
+    State, WakeCheck, WakeResult, decode, encode,
 )
 
 from .audio import Microphone, Player, refresh_devices, rms
-from .wake import WakeWord
+from .wake import MAYBE, WAKE, WakeWord
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +50,13 @@ FOLLOW_UP_S = float(os.environ.get("JARVIS_FOLLOW_UP_S", "10"))
 MIN_SPEECH_RMS = float(os.environ.get("JARVIS_SPEECH_RMS", "120"))
 EYE_HZ = 20                # how often the eye's tracking state goes to the page
 MIC_STALL_S = 2.0          # no audio at all for this long = mic unplugged; reopen the default
+# Recent audio kept while idle. Sent with a wake, so Jarvis hears the wake phrase too ("Good
+# morning Jarvis" gets "Good morning, Sir"), and used for the brain's wake-phrase check.
+PREROLL_S = 3.5
+# Wake-model score above which a phrase is checked with the brain (see wake.py)
+# (0.02: tested on synthetic voices, ordinary sentences stay at ~0.00-0.01)
+WAKE_CANDIDATE = float(os.environ.get("JARVIS_WAKE_CANDIDATE", "0.02"))
+WAKE_CHECK_MAX_AGE_S = 3.0  # ignore a brain "yes" that arrives later than this
 
 
 def _load_vad():
@@ -69,7 +79,9 @@ class Terminal:
         self.brain_url = brain_url
         self.terminal_id = terminal_id
         self.ui_port = ui_port
-        self.wake = WakeWord(threshold=wake_threshold) if use_wake else None
+        self.wake = WakeWord(threshold=wake_threshold, candidate=WAKE_CANDIDATE) if use_wake else None
+        self.preroll: collections.deque[bytes] = collections.deque(maxlen=int(PREROLL_S / FRAME_S))
+        self._wake_check: tuple[str, float] | None = None   # (check_id, sent at)
         self.mic_device, self.speaker_device = mic_device, speaker_device
 
         self.state = "idle"
@@ -106,17 +118,46 @@ class Terminal:
 
     # ---- talking -------------------------------------------------------
 
-    async def start_listening(self, reason: str, no_speech_s: float = NO_SPEECH_CANCEL_S) -> None:
+    async def start_listening(self, reason: str, no_speech_s: float = NO_SPEECH_CANCEL_S,
+                              with_preroll: bool = False) -> None:
         self.player.clear()  # tapping while Jarvis talks interrupts it
+        self._wake_check = None
         if not await self.to_brain(ListenStart(reason)):
             return
         now = time.monotonic()
         self._listen = {"started": now, "speech": False, "last_voice": now, "no_speech_s": no_speech_s}
+        if with_preroll and self.preroll:
+            # Send the wake phrase too. It counts as speech, so a bare "Good morning Jarvis"
+            # ends after the usual pause and gets a reply instead of waiting for more.
+            for frame in self.preroll:
+                await self.brain_ws.send_bytes(frame)
+            self._listen["speech"] = True
+        self.preroll.clear()
         self._replied = False
         if self.vad:
             self.vad.reset_states()
         await self.set_state("listening")
         log.info("listening (%s)", reason)
+
+    async def send_wake_check(self) -> None:
+        """The wake model half-heard "...Jarvis": ask the brain whether a wake phrase was said."""
+        if self._wake_check and time.monotonic() - self._wake_check[1] > WAKE_CHECK_MAX_AGE_S:
+            self._wake_check = None   # the brain never answered; don't block future checks
+        if self._wake_check or self.state != "idle" or not self.brain_ws or not self.preroll:
+            return
+        check_id = uuid.uuid4().hex[:8]
+        self._wake_check = (check_id, time.monotonic())
+        audio = base64.b64encode(b"".join(self.preroll)).decode()
+        await self.to_brain(WakeCheck(check_id, audio))
+
+    async def on_wake_result(self, msg: WakeResult) -> None:
+        pending = self._wake_check
+        if not pending or pending[0] != msg.check_id:
+            return
+        self._wake_check = None
+        fresh = time.monotonic() - pending[1] < WAKE_CHECK_MAX_AGE_S
+        if msg.ok and fresh and self.state == "idle":
+            await self.start_listening("wake_phrase", with_preroll=True)
 
     async def stop_listening(self, cancel: bool = False) -> None:
         await self.to_brain(ListenCancel() if cancel else ListenEnd())
@@ -177,8 +218,15 @@ class Terminal:
         level = rms(frame)
         if self.state == "idle":
             self.noise_floor = 0.95 * self.noise_floor + 0.05 * level
-            if self.wake and self.brain_ws and self.wake.heard(frame):
-                await self.start_listening("wake")
+            self.preroll.append(frame)
+            if self.wake and self.brain_ws:
+                heard = self.wake.check(frame)
+                if heard == WAKE:
+                    await self.start_listening("wake", with_preroll=True)
+                elif heard == MAYBE:
+                    # The score rises partway through "Jarvis": wait for the end of the word
+                    asyncio.get_running_loop().call_later(
+                        0.4, lambda: asyncio.create_task(self.send_wake_check()))
         elif self.state == "listening":
             await self._listening_frame(frame, level)
         elif self.state == "waiting":
@@ -248,6 +296,9 @@ class Terminal:
 
     async def _from_brain(self, raw: str) -> None:
         msg = decode(raw)
+        if isinstance(msg, WakeResult):
+            await self.on_wake_result(msg)
+            return  # nothing for the page to show
         if isinstance(msg, AudioStart):
             self._replied = True  # Jarvis is answering, so a follow-up makes sense afterwards
             self.player.begin(msg.sample_rate)
