@@ -22,7 +22,7 @@ touchscreen, talk normally, and Jarvis (Claude) answers out loud.
 | `firmware/` | ESP32-S3 mic node that tells the eye where sound is coming from ([docs/eye.md](docs/eye.md)) | the node |
 | `pi/` | Pi install, kiosk autostart, restart/stop helpers | Pi 5 |
 | `scripts/` | Dev-machine setup | dev PC |
-| `docs/` | [Architecture and decisions](docs/architecture.md) | |
+| `docs/` | [Architecture and decisions](docs/architecture.md), [the eye](docs/eye.md), [self-upgrade](docs/self-upgrade.md) | |
 
 Each part has its own `pyproject.toml`, so a Pi installs only `protocol` + `terminal`
 (no GPU or Claude libraries).

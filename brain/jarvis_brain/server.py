@@ -11,20 +11,23 @@ import base64
 import contextlib
 import logging
 import os
+import uuid
 
 import anthropic
 from aiohttp import WSMsgType, web
 
 from jarvis_protocol import (
-    AudioEnd, AudioStart, Decision, Error, Hello, ListenCancel, ListenEnd,
+    AudioEnd, AudioStart, Card, Decision, Error, Hello, ListenCancel, ListenEnd,
     ListenStart, ReplyText, State, Transcript, WakeCheck, WakeResult, Welcome, decode, encode,
 )
 
 from .approvals import ApprovalGate
-from .config import Settings
+from .config import REPO_ROOT, Settings
 from .llm import Conversation
+from .selfupgrade import UpgradeManager, take_rollback_note
 from .sentences import SentenceSplitter
 from .stt import Transcriber
+from .tools import TOOLS, ToolBox
 from .tts import make_speaker
 from .wakecheck import heard_wake_phrase
 
@@ -48,10 +51,21 @@ class Brain:
                         "`ant auth login` has been run for this account.")
         self.approvals = ApprovalGate()
         self.sessions: set[TerminalSession] = set()
+        self.upgrades = UpgradeManager(REPO_ROOT, self.approvals, self.announce)
+        # Said once to the first terminal that connects (e.g. "the last upgrade was rolled back")
+        self.notice = take_rollback_note(REPO_ROOT)
 
     async def broadcast(self, msg) -> None:
         for s in list(self.sessions):
             await s.send(msg)
+
+    async def announce(self, text: str, card: Card | None = None) -> None:
+        """Tell every terminal something unprompted: show the card, and say it if they're free."""
+        for s in list(self.sessions):
+            if card:
+                await s.send(card)
+            if not s.busy:
+                asyncio.create_task(s.speak_aside(text))
 
 
 class TerminalSession:
@@ -60,7 +74,9 @@ class TerminalSession:
         self.ws = ws
         self.terminal_id = "unknown"
         s = brain.settings
-        self.conversation = Conversation(brain.client, s.model, s.effort, s.idle_reset_minutes)
+        tools = ToolBox(brain.upgrades, self.send)
+        self.conversation = Conversation(brain.client, s.model, s.effort, s.idle_reset_minutes,
+                                         tools=TOOLS, run_tool=tools.run)
         self.listening = False
         self.audio = bytearray()
         self.turn: asyncio.Task | None = None
@@ -68,6 +84,15 @@ class TerminalSession:
     async def send(self, msg) -> None:
         if not self.ws.closed:
             await self.ws.send_str(encode(msg))
+
+    @property
+    def busy(self) -> bool:
+        return self.listening or bool(self.turn and not self.turn.done())
+
+    async def speak_aside(self, text: str) -> None:
+        """Say something outside a turn (approval results, announcements), then go idle."""
+        await self._speak_text(text)
+        await self.send(State("idle"))
 
     async def on_text(self, raw: str) -> None:
         msg = decode(raw)
@@ -77,6 +102,11 @@ class TerminalSession:
             await self.send(Welcome())
             for card in self.brain.approvals.pending():
                 await self.send(card)
+            if self.brain.notice:
+                notice, self.brain.notice = self.brain.notice, None
+                await self.send(Card(card_id=uuid.uuid4().hex, kind="info", title="Upgrade rolled back",
+                                     body=notice))
+                asyncio.create_task(self.speak_aside("Sir, " + notice))
         elif isinstance(msg, ListenStart):
             await self._cancel_turn()  # talking over Jarvis interrupts it
             self.listening, self.audio = True, bytearray()
@@ -93,7 +123,7 @@ class TerminalSession:
             asyncio.create_task(self._wake_check(msg))
         elif isinstance(msg, Decision):
             result = await self.brain.approvals.decide(msg.card_id, msg.decision)
-            await self._speak_text(result)
+            await self.speak_aside(result)
 
     def on_audio(self, data: bytes) -> None:
         if self.listening and len(self.audio) < MAX_UTTERANCE_S * 16_000 * 2:
