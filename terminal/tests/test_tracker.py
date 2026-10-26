@@ -99,16 +99,40 @@ def test_dropout_holds_range() -> None:
     assert abs(t["x"] - 0.3) < 0.05 and abs(t["y"] - 0.8) < 0.05, t
 
 
+def hum(tr: Tracker, n: int = 60, level: float = -72.0) -> None:
+    """Background noise the node still flags as 'detected' (as measured in the office)."""
+    for _ in range(n):
+        tr.bearing("N1", 120.0, level, True)
+
+
 def test_mute_ignores_bearings() -> None:
     """While Jarvis talks, its own voice must not pull the eye."""
     poses = {1: default_pose(1)}
     tr = make_tracker(poses, cls=_MutableTracker)
+    hum(tr)
     tr.set_muted(True)
     feed(tr, poses, 1.0, 1.5)
     assert tr.snapshot()["state"] != "tracking"
     tr.set_muted(False)
     feed(tr, poses, 1.0, 1.5)
     assert tr.snapshot()["state"] == "tracking"
+
+
+def test_gate_ignores_background_hum() -> None:
+    tr = make_tracker({1: default_pose(1)}, cls=_MutableTracker)
+    hum(tr, n=200)
+    assert tr.snapshot()["state"] != "tracking"
+
+
+def test_gate_passes_speech_over_hum() -> None:
+    """Someone talking (~-45 dBFS) over a -72 dBFS hum is followed."""
+    poses = {1: default_pose(1)}
+    tr = make_tracker(poses, cls=_MutableTracker)
+    hum(tr, n=200)
+    feed(tr, poses, -1.0, 1.8)    # feed() sends -40 dBFS
+    snap = tr.snapshot()
+    assert snap["state"] == "tracking", snap
+    assert snap["gaze"]["az"] < 0     # the person is on the eye's left (viewer's right)
 
 
 def test_registry_saves_new_node(tmp_path) -> None:

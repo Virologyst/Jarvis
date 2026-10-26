@@ -7,6 +7,7 @@ the node firmware is in firmware/node. This module is the Jarvis glue around the
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 from .registry import Registry
@@ -45,11 +46,30 @@ class Eye:
 
 
 class _MutableTracker(Tracker):
-    """The EGH490 tracker, plus a mute switch."""
+    """The EGH490 tracker, plus a mute switch and a loudness gate.
 
-    def __init__(self, registry: Registry) -> None:
+    The node flags almost any sound as "detected", including the background hum of fans and PCs
+    (measured: 96% of frames in a quiet office at ~-72 dBFS). The gate keeps a running estimate of
+    each node's background level and only lets a bearing through when the sound is clearly louder
+    than that, so the eye follows people talking instead of the air-con.
+    """
+
+    def __init__(self, registry: Registry, margin_db: float | None = None) -> None:
         super().__init__(registry)
         self._muted = False
+        self.margin_db = margin_db if margin_db is not None else float(
+            os.environ.get("JARVIS_EYE_MARGIN_DB", "12"))
+        self._floor: dict[str, float] = {}
+
+    def _loud_enough(self, mac: str, level_dbfs: float) -> bool:
+        """Track the background level (falls fast, rises slowly) and compare against it."""
+        floor = self._floor.get(mac, level_dbfs)
+        if level_dbfs < floor:
+            floor += 0.3 * (level_dbfs - floor)      # quiet: follow down quickly
+        else:
+            floor += 0.002 * (level_dbfs - floor)    # loud: creep up only if it lasts (new hum)
+        self._floor[mac] = floor
+        return level_dbfs >= floor + self.margin_db
 
     def set_muted(self, muted: bool) -> None:
         with self._lock:
@@ -59,6 +79,7 @@ class _MutableTracker(Tracker):
             self._muted = muted
 
     def bearing(self, mac: str, theta_deg: float, level_dbfs: float, detected: bool) -> None:
-        if self._muted:
+        loud = self._loud_enough(mac, level_dbfs)
+        if self._muted or not loud:
             detected = False
         super().bearing(mac, theta_deg, level_dbfs, detected)
