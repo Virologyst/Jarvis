@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from pathlib import Path
 
@@ -33,7 +34,11 @@ FRAME_S = 0.08
 SILENCE_TO_END_S = 0.9     # stop listening after this much quiet following speech
 NO_SPEECH_CANCEL_S = 6.0   # give up if nothing is said after waking
 MAX_LISTEN_S = 25.0
-MIN_SPEECH_RMS = 350.0     # floor for "someone is talking" on a quiet mic
+# After Jarvis answers, keep listening this long for a follow-up without "hey Jarvis" (0 = off)
+FOLLOW_UP_S = float(os.environ.get("JARVIS_FOLLOW_UP_S", "6"))
+# Floor for "someone is talking". Headset mics with a noise gate read ~0 in silence and only
+# ~100-700 for normal speech, so keep this low; raise it for noisy rooms.
+MIN_SPEECH_RMS = float(os.environ.get("JARVIS_SPEECH_RMS", "120"))
 EYE_HZ = 20                # how often the eye's tracking state goes to the page
 
 
@@ -54,7 +59,9 @@ class Terminal:
         self.ui_sockets: set[web.WebSocketResponse] = set()
         self.player = Player(speaker_device)
         self.noise_floor = 100.0
-        self._listen = {"started": 0.0, "speech": False, "last_voice": 0.0}
+        self._listen = {"started": 0.0, "speech": False, "last_voice": 0.0,
+                        "no_speech_s": NO_SPEECH_CANCEL_S}
+        self._replied = False
 
     # ---- outputs -------------------------------------------------------
 
@@ -79,12 +86,13 @@ class Terminal:
 
     # ---- talking -------------------------------------------------------
 
-    async def start_listening(self, reason: str) -> None:
+    async def start_listening(self, reason: str, no_speech_s: float = NO_SPEECH_CANCEL_S) -> None:
         self.player.clear()  # tapping while Jarvis talks interrupts it
         if not await self.to_brain(ListenStart(reason)):
             return
         now = time.monotonic()
-        self._listen = {"started": now, "speech": False, "last_voice": now}
+        self._listen = {"started": now, "speech": False, "last_voice": now, "no_speech_s": no_speech_s}
+        self._replied = False
         await self.set_state("listening")
         log.info("listening (%s)", reason)
 
@@ -119,7 +127,12 @@ class Terminal:
                     await self._listening_frame(frame, level)
                 elif self.state == "waiting":
                     if self.brain_state == "idle" and not self.player.busy:
-                        await self.set_state("idle")
+                        if FOLLOW_UP_S > 0 and self.brain_ws and self._replied:
+                            # Jarvis just answered: carry on the conversation without the wake word.
+                            # If nothing is said in time it cancels back to idle (no chain).
+                            await self.start_listening("follow_up", no_speech_s=FOLLOW_UP_S)
+                        else:
+                            await self.set_state("idle")
                         if self.wake:
                             self.wake.reset()
         finally:
@@ -138,7 +151,7 @@ class Terminal:
         elapsed = now - self._listen["started"]
         if self._listen["speech"] and now - self._listen["last_voice"] > SILENCE_TO_END_S:
             await self.stop_listening()
-        elif not self._listen["speech"] and elapsed > NO_SPEECH_CANCEL_S:
+        elif not self._listen["speech"] and elapsed > self._listen["no_speech_s"]:
             log.info("nothing said, cancelling")
             await self.stop_listening(cancel=True)
         elif elapsed > MAX_LISTEN_S:
@@ -176,6 +189,7 @@ class Terminal:
     async def _from_brain(self, raw: str) -> None:
         msg = decode(raw)
         if isinstance(msg, AudioStart):
+            self._replied = True  # Jarvis is answering, so a follow-up makes sense afterwards
             self.player.begin(msg.sample_rate)
         elif isinstance(msg, AudioEnd):
             pass  # playback drains on its own
