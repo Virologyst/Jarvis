@@ -19,7 +19,19 @@ fi
 
 echo "== Python environment (terminal only: no GPU or Claude libraries)"
 python3 -m venv "$REPO/.venv"
-"$REPO/.venv/bin/pip" install -q --disable-pip-version-check -e "$REPO/protocol" -e "$REPO/terminal"
+PIP="$REPO/.venv/bin/pip"
+# openwakeword's packaging demands tflite-runtime on Linux, which has no wheel for the Pi's
+# Python 3.13. Jarvis runs the wake word with ONNX instead (see terminal/jarvis_terminal/wake.py),
+# so install openwakeword without that requirement and give it the ONNX runtime it actually uses.
+"$PIP" install -q --disable-pip-version-check --no-deps "openwakeword>=0.6"
+"$PIP" install -q --disable-pip-version-check onnxruntime requests scikit-learn scipy tqdm
+# The terminal's other dependencies, read from its pyproject.toml (minus openwakeword, done above)
+DEPS=$("$REPO/.venv/bin/python" -c "
+import tomllib
+deps = tomllib.load(open('$REPO/terminal/pyproject.toml', 'rb'))['project']['dependencies']
+print(' '.join(repr(d.split('#')[0].strip()) for d in deps if not d.startswith('openwakeword')))")
+eval "\"$PIP\" install -q --disable-pip-version-check $DEPS"
+"$PIP" install -q --disable-pip-version-check --no-deps -e "$REPO/protocol" -e "$REPO/terminal"
 echo "== wake word model"
 "$REPO/.venv/bin/python" -c "import openwakeword.utils as u; u.download_models(['hey_jarvis'])"
 
