@@ -45,6 +45,7 @@ FOLLOW_UP_S = float(os.environ.get("JARVIS_FOLLOW_UP_S", "6"))
 # ~100-700 for normal speech, so keep this low; raise it for noisy rooms.
 MIN_SPEECH_RMS = float(os.environ.get("JARVIS_SPEECH_RMS", "120"))
 EYE_HZ = 20                # how often the eye's tracking state goes to the page
+MIC_STALL_S = 2.0          # no audio at all for this long = mic unplugged; reopen the default
 
 
 def _load_vad():
@@ -131,14 +132,14 @@ class Terminal:
 
     # ---- loops ---------------------------------------------------------
 
-    async def mic_loop(self) -> None:
-        # Keep trying until a mic is plugged in; the screen and eye work without one
+    async def _open_mic(self) -> Microphone:
+        """Open the mic, retrying until one is plugged in (the screen and eye work without one)."""
         warned = False
         while True:
             try:
                 mic = Microphone(asyncio.get_running_loop(), self.mic_device)
                 mic.start()
-                break
+                return mic
             except Exception as e:  # PortAudioError, ValueError (no such device)
                 if not warned:
                     log.warning("no microphone (%s); tap-to-talk and wake word are off until one "
@@ -146,29 +147,49 @@ class Terminal:
                     warned = True
                 await asyncio.sleep(10)
                 refresh_devices()
-        log.info("microphone open")
-        try:
-            while True:
-                frame = await mic.queue.get()
-                level = rms(frame)
-                if self.state == "idle":
-                    self.noise_floor = 0.95 * self.noise_floor + 0.05 * level
-                    if self.wake and self.brain_ws and self.wake.heard(frame):
-                        await self.start_listening("wake")
-                elif self.state == "listening":
-                    await self._listening_frame(frame, level)
-                elif self.state == "waiting":
-                    if self.brain_state == "idle" and not self.player.busy:
-                        if FOLLOW_UP_S > 0 and self.brain_ws and self._replied:
-                            # Jarvis just answered: carry on the conversation without the wake word.
-                            # If nothing is said in time it cancels back to idle (no chain).
-                            await self.start_listening("follow_up", no_speech_s=FOLLOW_UP_S)
-                        else:
-                            await self.set_state("idle")
-                        if self.wake:
-                            self.wake.reset()
-        finally:
-            mic.stop()
+
+    async def mic_loop(self) -> None:
+        while True:
+            mic = await self._open_mic()
+            log.info("microphone open")
+            try:
+                while True:
+                    try:
+                        frame = await asyncio.wait_for(mic.queue.get(), MIC_STALL_S)
+                    except asyncio.TimeoutError:
+                        # An unplugged mic just stops delivering audio, without an error.
+                        # Reopen, picking up whatever mic is the default now.
+                        log.warning("microphone stopped sending audio (unplugged?); reopening")
+                        break
+                    await self._on_frame(frame)
+            finally:
+                try:
+                    mic.stop()
+                except Exception:
+                    pass
+            self.player.close()   # re-scanning devices invalidates open streams; it reopens on demand
+            refresh_devices()
+            if self.state == "listening":
+                await self.stop_listening(cancel=True)
+
+    async def _on_frame(self, frame: bytes) -> None:
+        level = rms(frame)
+        if self.state == "idle":
+            self.noise_floor = 0.95 * self.noise_floor + 0.05 * level
+            if self.wake and self.brain_ws and self.wake.heard(frame):
+                await self.start_listening("wake")
+        elif self.state == "listening":
+            await self._listening_frame(frame, level)
+        elif self.state == "waiting":
+            if self.brain_state == "idle" and not self.player.busy:
+                if FOLLOW_UP_S > 0 and self.brain_ws and self._replied:
+                    # Jarvis just answered: carry on the conversation without the wake word.
+                    # If nothing is said in time it cancels back to idle (no chain).
+                    await self.start_listening("follow_up", no_speech_s=FOLLOW_UP_S)
+                else:
+                    await self.set_state("idle")
+                if self.wake:
+                    self.wake.reset()
 
     async def _listening_frame(self, frame: bytes, level: float) -> None:
         if self.brain_ws is None or self.brain_ws.closed:
