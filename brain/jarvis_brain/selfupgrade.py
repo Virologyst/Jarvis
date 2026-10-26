@@ -169,9 +169,10 @@ class UpgradeManager:
         self.claude_cmd = claude_cmd
         self.python = python
         # Run by Jarvis itself after Claude Code finishes; all must pass for "tests pass"
+        # (Only the brain is import-checked: the brain PC doesn't have the terminal's audio libs.)
         self.checks = checks or [
             [python, "-m", "pytest", "terminal/tests", "brain/tests", "-q"],
-            [python, "-c", "import jarvis_brain.server, jarvis_terminal.client"],
+            [python, "-c", "import jarvis_brain.server, jarvis_brain.tools"],
         ]
         self.timeout_s = timeout_s or float(os.environ.get("JARVIS_UPGRADE_TIMEOUT_MIN", "30")) * 60
         self.restart = restart or _restart_via_supervisor
