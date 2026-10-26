@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 
 import numpy as np
@@ -11,6 +12,8 @@ import sounddevice as sd
 from jarvis_protocol import MIC_SAMPLE_RATE
 
 FRAME_SAMPLES = 1280  # 80 ms at 16 kHz: what openWakeWord expects
+
+log = logging.getLogger(__name__)
 
 
 class Microphone:
@@ -55,13 +58,20 @@ class Player:
         if self._stream is None or self._rate != sample_rate:
             self.close()
             self._rate = sample_rate
-            self._stream = sd.RawOutputStream(
-                samplerate=sample_rate, channels=1, dtype="int16",
-                device=self.device, callback=self._callback,
-            )
-            self._stream.start()
+            try:
+                self._stream = sd.RawOutputStream(
+                    samplerate=sample_rate, channels=1, dtype="int16",
+                    device=self.device, callback=self._callback,
+                )
+                self._stream.start()
+            except (sd.PortAudioError, ValueError) as e:
+                # No speaker plugged in: drop Jarvis's audio rather than queue it forever
+                log.warning("no speaker (%s); replies are shown on screen only", e)
+                self._stream, self._rate = None, 0
 
     def feed(self, pcm: bytes) -> None:
+        if self._stream is None:
+            return
         with self._lock:
             self._buffer.extend(pcm)
 
@@ -88,6 +98,15 @@ class Player:
             self._stream.stop()
             self._stream.close()
             self._stream = None
+
+
+def refresh_devices() -> None:
+    """Re-scan audio devices (PortAudio only lists them at start-up), so a mic plugged in later shows up."""
+    try:
+        sd._terminate()
+        sd._initialize()
+    except Exception as e:  # private API; worst case we just don't see new devices
+        log.debug("could not refresh audio devices: %s", e)
 
 
 def rms(frame: bytes) -> float:

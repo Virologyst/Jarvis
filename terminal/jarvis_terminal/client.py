@@ -23,7 +23,7 @@ from jarvis_protocol import (
     State, decode, encode,
 )
 
-from .audio import Microphone, Player, rms
+from .audio import Microphone, Player, refresh_devices, rms
 from .wake import WakeWord
 
 log = logging.getLogger(__name__)
@@ -112,8 +112,20 @@ class Terminal:
     # ---- loops ---------------------------------------------------------
 
     async def mic_loop(self) -> None:
-        mic = Microphone(asyncio.get_running_loop(), self.mic_device)
-        mic.start()
+        # Keep trying until a mic is plugged in; the screen and eye work without one
+        warned = False
+        while True:
+            try:
+                mic = Microphone(asyncio.get_running_loop(), self.mic_device)
+                mic.start()
+                break
+            except Exception as e:  # PortAudioError, ValueError (no such device)
+                if not warned:
+                    log.warning("no microphone (%s); tap-to-talk and wake word are off until one "
+                                "is plugged in. Checking every 10 s.", e)
+                    warned = True
+                await asyncio.sleep(10)
+                refresh_devices()
         log.info("microphone open")
         try:
             while True:
