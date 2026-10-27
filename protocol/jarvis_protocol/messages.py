@@ -141,8 +141,12 @@ class ReplyText:
 @_message("audio_start")
 @dataclass
 class AudioStart:
-    """Speech audio follows as binary frames at this sample rate."""
+    """Speech audio follows as binary frames at this sample rate.
+
+    follow_up: said unprompted (a reminder) but expecting an answer, so an idle terminal keeps
+    the mic open for a few seconds afterwards, as it does after a reply."""
     sample_rate: int
+    follow_up: bool = False
 
 
 @_message("audio_end")

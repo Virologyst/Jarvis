@@ -134,6 +134,10 @@ _TASK_REF = {"type": "string",
                              "or words from its title.")}
 _DATE = ("YYYY-MM-DD, or a plain word like 'today', 'tomorrow', 'friday', 'next monday', "
          "'in 3 days'. Brisbane time.")
+_REMIND_WHEN = ("When to remind them, Brisbane time: a date and time like '2026-10-30 16:30' or "
+                "'tomorrow 09:00', a time like '15:00' (the next one), 'in 20 minutes', or "
+                "relative to when it's due: 'an hour before', '30 minutes before', 'a day "
+                "before', 'the morning of', 'the evening before', 'when it's due'.")
 
 TOOLS += [
     {
@@ -141,14 +145,16 @@ TOOLS += [
         "description": (
             "Add a task or appointment to someone's to-do list, with an optional due date and "
             "time (Brisbane). A time with no date means the next time it comes round. Put any "
-            "context you already know (agenda, who's involved, background) in notes."),
+            "context you already know (agenda, who's involved, background) in notes. If they "
+            "already said when to be reminded, put it in reminder; if not, ask afterwards."),
         "input_schema": _schema(
             {"title": {"type": "string", "description": "Short description, e.g. 'Meeting with "
                                                         "Sam about the website'."},
              "person": _PERSON,
              "due_date": {"type": "string", "description": "When it's due: " + _DATE},
              "due_time": {"type": "string", "description": "A specific time, HH:MM 24-hour."},
-             "notes": {"type": "string", "description": "Context to keep with the task."}},
+             "notes": {"type": "string", "description": "Context to keep with the task."},
+             "reminder": {"type": "string", "description": _REMIND_WHEN}},
             ["title"]),
         "strict": True,
     },
@@ -230,6 +236,27 @@ TOOLS += [
         "strict": True,
     },
     {
+        "name": "set_task_reminder",
+        "description": (
+            "Set, change, add, clear or snooze a reminder on a task. When it falls due you say "
+            "it aloud on the office screens, unprompted. set replaces any reminder still to "
+            "come; add keeps them and adds another; clear removes them; snooze says it again "
+            "after a while, e.g. 'snooze it fifteen minutes' -> when '15 minutes' (leave task "
+            "empty to snooze the reminder you just gave). The result gives the exact Brisbane "
+            "time it settled on: say it back so they can correct it."),
+        "input_schema": _schema(
+            {"task": {"type": "string",
+                      "description": _TASK_REF["description"] + " Empty only for snooze, "
+                                                                "meaning the reminder just given."},
+             "person": _PERSON,
+             "action": {"type": "string", "enum": ["set", "add", "clear", "snooze"]},
+             "when": {"type": "string",
+                      "description": (_REMIND_WHEN + " For snooze: how long, like '15 minutes' "
+                                      "or 'an hour', or a time. Empty for clear.")}},
+            ["action"]),
+        "strict": True,
+    },
+    {
         "name": "add_person",
         "description": ("Start a task list for someone new in the office, by name. Check the "
                         "name first if speech recognition may have misheard it."),
@@ -244,7 +271,7 @@ TOOLS += [
     },
 ]
 _TASK_TOOLS = {"add_task", "tasks_for_day", "list_tasks", "find_task", "update_task",
-               "delete_task", "task_notes", "add_person", "list_people"}
+               "delete_task", "task_notes", "set_task_reminder", "add_person", "list_people"}
 
 
 class ToolBox:
@@ -308,7 +335,7 @@ class ToolBox:
 
         if name == "add_task":
             return t.add_task(arg("title") or "", arg("person"), arg("due_date"), arg("due_time"),
-                              arg("notes"), speaker=me)
+                              arg("notes"), arg("reminder"), speaker=me)
         if name == "tasks_for_day":
             return t.rundown(arg("person"), arg("date"), speaker=me)
         if name == "list_tasks":
@@ -324,6 +351,9 @@ class ToolBox:
         if name == "task_notes":
             return t.task_notes(arg("task") or "", arg("text") or "", arg("person"),
                                 bool(args.get("replace")), speaker=me)
+        if name == "set_task_reminder":
+            return t.set_reminder(arg("task"), arg("when"), arg("action") or "set",
+                                  arg("person"), speaker=me)
         if name == "add_person":
             return t.add_person(arg("name") or "")
         return t.list_people()

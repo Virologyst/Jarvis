@@ -36,6 +36,19 @@ class Conversation:
         self.messages: list[dict] = []
         self.last_turn = 0.0
 
+    def add_aside(self, context: str, said: str) -> None:
+        """Record something Jarvis said unprompted (a task reminder), so an answer to it
+        ("snooze it", "mark it done") makes sense: `context` goes in as a user message saying
+        what happened, then `said` as Jarvis's reply. Counts as a turn for the idle reset."""
+        now = time.monotonic()
+        if self.messages and now - self.last_turn > self.idle_reset_s:
+            self.messages = []
+        if self.messages and self.messages[-1]["role"] != "assistant":
+            return   # a turn is half-way through; never break the history's order
+        self.messages += [{"role": "user", "content": context},
+                          {"role": "assistant", "content": said}]
+        self.last_turn = now
+
     async def reply(self, user_text: str | list[dict]) -> AsyncIterator[str]:
         """Yield the reply as text pieces, running any tools Claude calls along the way.
 

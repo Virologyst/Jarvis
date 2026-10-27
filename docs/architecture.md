@@ -86,6 +86,19 @@ speaker's name, ready for voice identification. Tasks have an optional due date 
 tools change only Jarvis's own notebook, like the theme choice, so they run without an approval
 card; deleting moves a task to a bin it can be restored from.
 
+### Reminders
+A task can have reminders, saved with it in `data/tasks.json`. `set_task_reminder` (or
+`add_task`'s `reminder`) takes a Brisbane date and time or a time relative to the deadline ("an
+hour before", "the morning of") and reports the exact time back; it also snoozes the reminder just
+given. Jarvis asks whether and when to remind after adding a task. `reminders.py` checks every 30
+seconds; a due reminder on an open task is queued on every connected terminal and said, in persona,
+once that terminal is quiet (not listening, thinking, speaking or still playing). It's then marked
+delivered and saved, so it's said once, even across restarts. `AudioStart(follow_up=True)` makes an
+idle terminal open the mic afterwards, and the reminder is added to that terminal's conversation so
+"snooze it fifteen minutes" makes sense. One that fell due while the brain was off is still said
+unless the task is over an hour past its deadline (or, with no deadline, 12 hours late); done,
+deleted and on-hold tasks stay quiet.
+
 ## Roadmap
 1. Skeleton: wake word → STT → Claude → TTS on the dev PC. Built and tested end to end
    except the Claude call itself (needs an API key in `.env`). Measured on the dev PC

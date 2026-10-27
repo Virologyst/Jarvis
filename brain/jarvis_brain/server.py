@@ -8,6 +8,8 @@ Each sentence starts with a mood tag ([amused] ...) that becomes an Emote messag
 audio; tags are stripped from everything shown or spoken. A short spoken "approve"/"reject" is
 handled here in code and never reaches Claude, and so is switching permanent listening on or
 off ("listen to me from now on" / "stop listening"); while it's on, noise and scraps are dropped.
+Task reminders (reminders.py) are said unprompted on every terminal once it's quiet, and the
+terminal then listens for an answer as it does after a reply.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ import base64
 import contextlib
 import logging
 import os
+import time
 import uuid
 
 import anthropic
@@ -33,6 +36,7 @@ from .config import REPO_ROOT, Settings
 from .emotions import TagStripper, parse_sentence
 from .listenmode import addressed, is_noise, listen_mode_command
 from .llm import Conversation
+from .reminders import ReminderService
 from .selfupgrade import UpgradeManager, take_rollback_note
 from .sentences import SentenceSplitter
 from .stt import Transcriber
@@ -47,6 +51,9 @@ log = logging.getLogger(__name__)
 
 AUDIO_CHUNK_BYTES = 8192   # size of speech frames sent to terminals
 MAX_UTTERANCE_S = 30       # ignore audio beyond this per turn
+# A reminder waits this long after the last speech should have finished playing, so the
+# terminal can open its mic for a follow-up first (it's then busy listening, and waits more)
+REMINDER_GAP_S = 2.0
 MAX_IMAGES = 5             # pictures per typed message
 IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 WS_MAX_BYTES = 32 * 1024 * 1024
@@ -71,6 +78,8 @@ class Brain:
         self.approvals.restore()   # after every owner of saved cards has registered
         self.themes = ThemeStore(REPO_ROOT / "data" / "themes.json")
         self.tasks = TaskStore(REPO_ROOT / "data" / "tasks.json")   # shared by every terminal
+        self.reminders = ReminderService(self.tasks, self.deliver_reminder)
+        self._reminder_loop: asyncio.Task | None = None
         # Said once to the first terminal that connects: (card title, what to say)
         rolled_back = take_rollback_note(REPO_ROOT)
         self.notice: tuple[str, str] | None = ("Upgrade rolled back", rolled_back) if rolled_back else None
@@ -80,6 +89,22 @@ class Brain:
         resumed = await self.upgrades.resume()
         if resumed and not self.notice:
             self.notice = ("Self-upgrade", resumed[0].upper() + resumed[1:])
+        self._reminder_loop = asyncio.create_task(self.reminders.run())
+
+    async def on_cleanup(self, app: web.Application) -> None:
+        if self._reminder_loop:
+            self._reminder_loop.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._reminder_loop
+
+    async def deliver_reminder(self, due) -> bool:
+        """Say a task reminder on every terminal, each as soon as it's free. False (try again
+        later) if no terminal is connected to hear it."""
+        if not self.sessions:
+            return False
+        for s in list(self.sessions):
+            s.queue_reminder(due)
+        return True
 
     async def decide(self, card_id: str, decision: str) -> str:
         """Approve/reject a card (from a tap or a spoken word) and take it down on every screen."""
@@ -116,6 +141,10 @@ class TerminalSession:
         self.always_listening = False   # permanent listening, per terminal; off at startup
         self.audio = bytearray()
         self.turn: asyncio.Task | None = None
+        self.reminders: list = []             # task reminders waiting for a quiet moment
+        self._reminding: asyncio.Task | None = None
+        self._asides = 0                      # unprompted speech under way
+        self.audio_until = 0.0                # when the speech sent so far ends (monotonic)
 
     async def set_theme(self, name: str, announce: bool = True) -> str:
         theme = resolve(name)
@@ -145,10 +174,38 @@ class TerminalSession:
     def busy(self) -> bool:
         return self.listening or bool(self.turn and not self.turn.done())
 
-    async def speak_aside(self, text: str) -> None:
-        """Say something outside a turn (approval results, announcements), then go idle."""
-        await self._speak_text(text)
+    async def speak_aside(self, text: str, follow_up: bool = False) -> None:
+        """Say something outside a turn (approval results, announcements), then go idle.
+        follow_up: the terminal listens for an answer afterwards."""
+        self._asides += 1
+        try:
+            await self._speak_text(text, follow_up)
+        finally:
+            self._asides -= 1
         await self.send(State("idle"))
+
+    @property
+    def quiet(self) -> bool:
+        """Nothing being heard, thought about or said here, nor still playing."""
+        return (not self.busy and not self._asides
+                and time.monotonic() > self.audio_until + REMINDER_GAP_S)
+
+    def queue_reminder(self, due) -> None:
+        self.reminders.append(due)
+        if not self._reminding or self._reminding.done():
+            self._reminding = asyncio.create_task(self._say_reminders())
+
+    async def _say_reminders(self) -> None:
+        """Say queued reminders one at a time, never over Jarvis or the person talking."""
+        while self.reminders and not self.ws.closed:
+            if not self.quiet:
+                await asyncio.sleep(0.5)
+                continue
+            due = self.reminders.pop(0)
+            # So "snooze it" or "mark it done" afterwards makes sense to Claude
+            self.conversation.add_aside(due.note, due.text)
+            log.info("[%s] reminder: %s", self.terminal_id, due.text)
+            await self.speak_aside(due.text, follow_up=True)
 
     async def on_text(self, raw: str) -> None:
         msg = decode(raw)
@@ -309,19 +366,19 @@ class TerminalSession:
             if not self.ws.closed:
                 await self.send(State("idle"))
 
-    async def _speak_text(self, text: str) -> None:
+    async def _speak_text(self, text: str, follow_up: bool = False) -> None:
         async def once():
             yield text
-        await self._speak_stream(once())
+        await self._speak_stream(once(), follow_up)
 
-    async def _speak_stream(self, pieces) -> None:
+    async def _speak_stream(self, pieces, follow_up: bool = False) -> None:
         """Send reply text as it arrives and speak it sentence by sentence.
 
         Mood tags are stripped from the text shown on screen; each spoken sentence's tag becomes
         an Emote sent just before its audio.
         """
         sentences: asyncio.Queue[str | None] = asyncio.Queue()
-        speaker = asyncio.create_task(self._speak_worker(sentences))
+        speaker = asyncio.create_task(self._speak_worker(sentences, follow_up))
         splitter = SentenceSplitter()
         shown = TagStripper()
         try:
@@ -340,7 +397,7 @@ class TerminalSession:
         finally:
             speaker.cancel()
 
-    async def _speak_worker(self, sentences: asyncio.Queue) -> None:
+    async def _speak_worker(self, sentences: asyncio.Queue, follow_up: bool = False) -> None:
         started = False
         try:
             while (sentence := await sentences.get()) is not None:
@@ -352,8 +409,10 @@ class TerminalSession:
                 if not started:
                     started = True
                     await self.send(State("speaking"))
-                    await self.send(AudioStart(self.brain.tts.sample_rate))
+                    await self.send(AudioStart(self.brain.tts.sample_rate, follow_up))
                 await self.send(Emote(emotion))
+                seconds = len(pcm) / 2 / self.brain.tts.sample_rate
+                self.audio_until = max(self.audio_until, time.monotonic()) + seconds
                 for i in range(0, len(pcm), AUDIO_CHUNK_BYTES):
                     await self.ws.send_bytes(pcm[i:i + AUDIO_CHUNK_BYTES])
         finally:
@@ -376,6 +435,8 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
     finally:
         brain.sessions.discard(session)
         await session._cancel_turn()
+        if session._reminding:
+            session._reminding.cancel()
         log.info("terminal disconnected: %s", session.terminal_id)
     return ws
 
@@ -388,6 +449,7 @@ def build_app(settings: Settings) -> web.Application:
     app = web.Application()
     app["brain"] = Brain(settings)
     app.on_startup.append(app["brain"].on_startup)
+    app.on_cleanup.append(app["brain"].on_cleanup)
     app.router.add_get("/ws", ws_handler)
     app.router.add_get("/health", health)
     return app

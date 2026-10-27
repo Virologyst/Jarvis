@@ -362,6 +362,10 @@ class Terminal:
             return
         if isinstance(msg, AudioStart):
             self._replied = True  # Jarvis is answering, so a follow-up makes sense afterwards
+            if msg.follow_up and self.state == "idle":
+                # Said unprompted (a reminder): ignore the mic while it plays, then listen
+                # for an answer as after any reply
+                await self.set_state("waiting")
             self.player.begin(msg.sample_rate)
         elif isinstance(msg, AudioEnd):
             pass  # playback drains on its own
