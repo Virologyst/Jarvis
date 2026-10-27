@@ -54,6 +54,11 @@ FOLLOW_UP_S = float(os.environ.get("JARVIS_FOLLOW_UP_S", "10"))
 MIN_SPEECH_RMS = float(os.environ.get("JARVIS_SPEECH_RMS", "120"))
 EYE_HZ = 20                # how often the eye's tracking state goes to the page
 MIC_STALL_S = 2.0          # no audio at all for this long = mic unplugged; reopen the default
+# Exact digital silence this long while idle = the device has probably gone (a headset
+# reconnected, the default device changed): Windows keeps feeding such a stream zeros instead of
+# raising an error. Reopening also picks up the new default speaker. Long, because a mic with a
+# noise gate can send zeros in a quiet room; reopening it then is harmless.
+MIC_DEAD_S = 30.0
 # Recent audio kept while idle. Sent with a wake, so Jarvis hears the wake phrase too ("Good
 # morning Jarvis" gets "Good morning, Sir"), and used for the brain's wake-phrase check.
 PREROLL_S = 3.5
@@ -208,6 +213,7 @@ class Terminal:
         while True:
             mic = await self._open_mic()
             log.info("microphone open")
+            silent_s = 0.0
             try:
                 while True:
                     try:
@@ -216,6 +222,11 @@ class Terminal:
                         # An unplugged mic just stops delivering audio, without an error.
                         # Reopen, picking up whatever mic is the default now.
                         log.warning("microphone stopped sending audio (unplugged?); reopening")
+                        break
+                    silent_s = silent_s + FRAME_S if not any(frame) else 0.0
+                    if silent_s >= MIC_DEAD_S and self.state == "idle" and not self.player.busy:
+                        log.info("microphone has sent only zeros for %.0f s (device changed?); "
+                                 "reopening the default mic and speaker", silent_s)
                         break
                     await self._on_frame(frame)
             finally:
