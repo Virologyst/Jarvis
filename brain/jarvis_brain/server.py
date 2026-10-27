@@ -45,7 +45,7 @@ from .tasks import TaskStore
 from .tools import TOOLS, ToolBox
 from .tts import make_speaker
 from .voicecommands import parse_voice_decision, pick_card
-from .wakecheck import heard_wake_phrase
+from .wakecheck import bare_wake_reply, heard_wake_phrase
 
 log = logging.getLogger(__name__)
 
@@ -57,6 +57,7 @@ REMINDER_GAP_S = 2.0
 MAX_IMAGES = 5             # pictures per typed message
 IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 WS_MAX_BYTES = 32 * 1024 * 1024
+SPEECH_CACHE_CHARS = 40    # short sentences ("Yes, Sir?") are synthesised once and kept
 
 
 class Brain:
@@ -145,6 +146,8 @@ class TerminalSession:
         self._reminding: asyncio.Task | None = None
         self._asides = 0                      # unprompted speech under way
         self.audio_until = 0.0                # when the speech sent so far ends (monotonic)
+        self.turn_t0 = 0.0                    # when this turn's speech ended, for timing logs
+        self._speech_cache: dict[tuple, bytes] = {}
 
     async def set_theme(self, name: str, announce: bool = True) -> str:
         theme = resolve(name)
@@ -230,7 +233,8 @@ class TerminalSession:
             if self.listening:
                 self.listening = False
                 pcm, self.audio = bytes(self.audio), bytearray()
-                self.turn = asyncio.create_task(self._run_turn(pcm))
+                self.turn_t0 = time.monotonic()
+                self.turn =asyncio.create_task(self._run_turn(pcm))
         elif isinstance(msg, ListenCancel):
             self.listening, self.audio = False, bytearray()
             await self.send(State("idle"))
@@ -242,6 +246,7 @@ class TerminalSession:
         elif isinstance(msg, UserInput):
             await self._cancel_turn()
             self.listening, self.audio = False, bytearray()
+            self.turn_t0 = time.monotonic()
             self.turn = asyncio.create_task(self._run_typed_turn(msg))
         elif isinstance(msg, SetTheme):
             with contextlib.suppress(ValueError):   # picked on the screen: switch, quietly
@@ -282,7 +287,8 @@ class TerminalSession:
         async def spoken():
             await self.send(State("thinking"))
             text = await asyncio.to_thread(self.brain.stt.transcribe, pcm)
-            log.info("[%s] heard: %r", self.terminal_id, text)
+            log.info("[%s] heard: %r (%.1fs of audio, speech-to-text %.2fs)", self.terminal_id,
+                     text, len(pcm) / 32_000, self._since_turn())
             if not text:
                 return
             if ambient and listen_mode_command(text) is None and is_noise(text):
@@ -290,6 +296,12 @@ class TerminalSession:
                 return
             await self.send(Transcript(text))
             if await self._voice_command(text, ambient):
+                return
+            if (ack := bare_wake_reply(text)) is not None:
+                # Just "Hey Jarvis": answer now, and let the terminal listen for the request.
+                # Recorded so Claude sees it was woken when the request comes.
+                self.conversation.add_aside(text, ack)
+                await self._speak_text(ack)
                 return
             await self._speak_stream(self.conversation.reply(text))
         await self._guarded(spoken())
@@ -381,8 +393,12 @@ class TerminalSession:
         speaker = asyncio.create_task(self._speak_worker(sentences, follow_up))
         splitter = SentenceSplitter()
         shown = TagStripper()
+        first = True
         try:
             async for piece in pieces:
+                if first and self.turn_t0:
+                    first = False
+                    log.info("[timing] first reply text %.2fs after end of speech", self._since_turn())
                 if text := shown.feed(piece):
                     await self.send(ReplyText(text))
                 for sentence in splitter.feed(piece):
@@ -404,10 +420,14 @@ class TerminalSession:
                 emotion, clean = parse_sentence(sentence)
                 if not any(c.isalnum() for c in clean):
                     continue
-                pcm = await asyncio.to_thread(self.brain.tts.synthesize, clean,
-                                              self.theme.voice, self.theme.speed)
+                t = time.monotonic()
+                pcm = await self._synthesize(clean)
                 if not started:
                     started = True
+                    if self.turn_t0:   # not for asides and reminders
+                        log.info("[timing] first audio %.2fs after end of speech (text-to-speech "
+                                 "%.2fs)", self._since_turn(), time.monotonic() - t)
+                        self.turn_t0 = 0.0
                     await self.send(State("speaking"))
                     await self.send(AudioStart(self.brain.tts.sample_rate, follow_up))
                 await self.send(Emote(emotion))
@@ -418,6 +438,20 @@ class TerminalSession:
         finally:
             if started and not self.ws.closed:
                 await self.send(AudioEnd())
+
+    async def _synthesize(self, text: str) -> bytes:
+        key = (text, self.theme.voice, self.theme.speed)
+        if key in self._speech_cache:
+            return self._speech_cache[key]
+        pcm = await asyncio.to_thread(self.brain.tts.synthesize, text,
+                                      self.theme.voice, self.theme.speed)
+        if len(text) <= SPEECH_CACHE_CHARS and len(self._speech_cache) < 100:
+            self._speech_cache[key] = pcm
+        return pcm
+
+    def _since_turn(self) -> float:
+        """Seconds since this turn's speech ended (or the message was typed)."""
+        return time.monotonic() - self.turn_t0 if self.turn_t0 else 0.0
 
 
 async def ws_handler(request: web.Request) -> web.WebSocketResponse:

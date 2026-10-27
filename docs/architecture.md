@@ -35,6 +35,14 @@ idle again once playback drains           State(idle)
 ```
 
 - Everything streams: Jarvis starts speaking after the **first sentence**, not the whole reply.
+- A bare wake phrase ("Hey Jarvis.") is answered in code ("Yes, Sir?", cached audio) without a
+  Claude call, then the terminal listens for the request; the exchange is added to the
+  conversation so Claude has it.
+- End of speech: Silero VAD on 512-sample windows, and while listening a frame no louder than
+  `JARVIS_QUIET_FACTOR` (1.5) times the room's quiet level before the wake isn't speech, so a hum
+  the VAD mistakes for voice can't hold the mic open to the 25 s limit.
+- Timing: both sides log `[timing]` lines (wake heard, end of speech and why, speech-to-text,
+  each Claude round, first text, text-to-speech, first audio, mic lag) to find slow stages.
 - Tapping the button (or a new ListenStart) while Jarvis talks interrupts it.
 - Half-duplex for now: the mic is ignored while Jarvis thinks/speaks (no echo loops).
   True barge-in by voice needs echo cancellation — the speakerphone provides it; enable later.

@@ -66,8 +66,9 @@ class Conversation:
         turn_start = len(self.messages)
         self.messages.append({"role": "user", "content": user_text})
         try:
-            for _ in range(MAX_TOOL_ROUNDS):
+            for round_no in range(1, MAX_TOOL_ROUNDS + 1):
                 extra = {"tools": self.tools} if self.tools else {}
+                started, first_text = time.monotonic(), None
                 async with self.client.beta.messages.stream(
                     model=self.model,
                     max_tokens=16000,
@@ -82,8 +83,13 @@ class Conversation:
                     **extra,
                 ) as stream:
                     async for text in stream.text_stream:
+                        if first_text is None:
+                            first_text = time.monotonic() - started
                         yield text
                     final = await stream.get_final_message()
+                log.info("[timing] Claude round %d: %.2fs (first text %s, stop: %s)", round_no,
+                         time.monotonic() - started,
+                         "none" if first_text is None else f"{first_text:.2f}s", final.stop_reason)
 
                 if final.stop_reason == "refusal":
                     log.warning("refusal: %s", getattr(final, "stop_details", None))
