@@ -38,6 +38,7 @@ from .sentences import SentenceSplitter
 from .stt import Transcriber
 from .themes import DEFAULT_THEME, THEMES, ThemeStore, resolve
 from .tasks import TaskStore
+from .vault import Vault
 from .tools import TOOLS, ToolBox
 from .tts import make_speaker
 from .voicecommands import parse_voice_decision, pick_card
@@ -71,6 +72,8 @@ class Brain:
         self.approvals.restore()   # after every owner of saved cards has registered
         self.themes = ThemeStore(REPO_ROOT / "data" / "themes.json")
         self.tasks = TaskStore(REPO_ROOT / "data" / "tasks.json")   # shared by every terminal
+        self.vault = Vault.from_env()   # Sir's Obsidian notes (JARVIS_VAULT), if set
+        log.info("notes vault: %s", self.vault.root or "not set (JARVIS_VAULT)")
         # Said once to the first terminal that connects: (card title, what to say)
         rolled_back = take_rollback_note(REPO_ROOT)
         self.notice: tuple[str, str] | None = ("Upgrade rolled back", rolled_back) if rolled_back else None
@@ -108,7 +111,7 @@ class TerminalSession:
         self.theme = THEMES[DEFAULT_THEME]
         s = brain.settings
         tools = ToolBox(brain.upgrades, self.send, current_theme=lambda: self.theme.title,
-                        set_theme=self.set_theme, tasks=brain.tasks)
+                        set_theme=self.set_theme, tasks=brain.tasks, vault=brain.vault)
         self.conversation = Conversation(brain.client, s.model, s.effort, s.idle_reset_minutes,
                                          tools=TOOLS, run_tool=tools.run)
         self.listening = False

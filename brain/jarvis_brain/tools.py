@@ -2,7 +2,8 @@
 
 Every tool that changes anything outside Jarvis only *proposes* it: the handler returns a card for
 the screen and the real work runs after someone taps Approve (see approvals.py). Jarvis's own
-state (the screen theme, the task lists) changes directly. Add new tools here.
+state (the screen theme, the task lists) changes directly, and so do Sir's Obsidian project notes,
+which he asked Jarvis to keep (additions and ticks only, each one logged). Add new tools here.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from jarvis_protocol import Card
 from . import clock
 from .tasks import TaskError, TaskStore
 from .themes import THEMES, describe
+from .vault import Vault, VaultError
 
 log = logging.getLogger(__name__)
 
@@ -246,6 +248,105 @@ TOOLS += [
 _TASK_TOOLS = {"add_task", "tasks_for_day", "list_tasks", "find_task", "update_task",
                "delete_task", "task_notes", "add_person", "list_people"}
 
+# --- Sir's Obsidian vault (vault.py) --------------------------------------------------------------
+# Project notes Sir asked Jarvis to keep up to date. Nothing is ever deleted (tasks are ticked
+# off, not removed) and every change is written in the project's Log, so these run without a card.
+
+_PROJECT = {"type": "string",
+            "description": "Which project, by name, e.g. 'J.A.R.V.I.S' or 'Jarvis'."}
+
+TOOLS += [
+    {
+        "name": "vault_projects",
+        "description": ("Every project in Sir's Obsidian notes: status, progress, next step and "
+                        "how many tasks are open or marked for you (#j)."),
+        "input_schema": _schema(),
+        "strict": True,
+    },
+    {
+        "name": "vault_read",
+        "description": (
+            "Read a note from Sir's Obsidian vault. For a project: its status, progress, next "
+            "step, open tasks with their numbers, and recent log. For any other note (e.g. the "
+            "Success Map): its text. Give a heading to read just that part of a long note."),
+        "input_schema": _schema(
+            {"note": {"type": "string", "description": "The note or project's name."},
+             "section": {"type": "string", "description": "A heading to read on its own."}},
+            ["note"]),
+        "strict": True,
+    },
+    {
+        "name": "vault_add_task",
+        "description": (
+            "Add a checkbox task to a project. Goes under the Tasks heading unless a heading is "
+            "given (e.g. 'Next up', or a group like 'Brain PC'), or under an existing task as a "
+            "sub-step. for_j true marks it #j: one you may do or chase."),
+        "input_schema": _schema(
+            {"project": _PROJECT,
+             "text": {"type": "string", "description": "The task, short."},
+             "section": {"type": "string", "description": "Heading to put it under."},
+             "under": {"type": "string",
+                       "description": "An existing task (number or words) to add it beneath."},
+             "for_j": {"type": "boolean", "description": "True to mark it #j."}},
+            ["project", "text"]),
+        "strict": True,
+    },
+    {
+        "name": "vault_update_task",
+        "description": ("Tick off (done), reopen (open) or reword a project's task. Refer to it "
+                        "by its number from vault_read (best) or words from it."),
+        "input_schema": _schema(
+            {"project": _PROJECT,
+             "task": {"type": "string", "description": "The task's number or words from it."},
+             "status": {"type": "string", "enum": ["done", "open"]},
+             "text": {"type": "string", "description": "New wording."}},
+            ["project", "task"]),
+        "strict": True,
+    },
+    {
+        "name": "vault_update_project",
+        "description": (
+            "Change a project's status, progress or next step, and/or add a line to its log "
+            "(decisions, milestones, what happened). Leave what doesn't change empty."),
+        "input_schema": _schema(
+            {"project": _PROJECT,
+             "status": {"type": "string", "enum": ["idea", "planned", "active", "on hold", "done"]},
+             "progress": {"type": "string", "description": "Percent done, 0 to 100."},
+             "next_step": {"type": "string", "description": "The very next step, in a few words."},
+             "log": {"type": "string", "description": "A line for the project's log."}},
+            ["project"]),
+        "strict": True,
+    },
+    {
+        "name": "vault_new_project",
+        "description": ("Start a new project note from Sir's Project template and link it from "
+                        "the Success Map. Check the name with Sir first."),
+        "input_schema": _schema(
+            {"name": {"type": "string", "description": "The project's name."},
+             "about": {"type": "string",
+                       "description": "One or two sentences: what it is and what done looks like."},
+             "status": {"type": "string", "enum": ["idea", "planned", "active", "on hold", "done"]}},
+            ["name"]),
+        "strict": True,
+    },
+    {
+        "name": "vault_add_point",
+        "description": (
+            "Add a bullet point to any note under a heading (made if it doesn't exist), or "
+            "beneath an existing bullet. Each bullet is a branch on that note's mind map, so use "
+            "this to grow a mind map or add notes, ideas and decisions."),
+        "input_schema": _schema(
+            {"note": {"type": "string", "description": "The note's name."},
+             "heading": {"type": "string", "description": "The heading to add it under."},
+             "text": {"type": "string", "description": "The point, one line."},
+             "under": {"type": "string", "description": "An existing bullet to nest it beneath."}},
+            ["note", "heading", "text"]),
+        "strict": True,
+    },
+]
+_VAULT_TOOLS = {"vault_projects", "vault_read", "vault_add_task", "vault_update_task",
+                "vault_update_project", "vault_new_project", "vault_add_point"}
+
 
 class ToolBox:
     """Runs tool calls for one terminal's conversation; shows any cards on that terminal."""
@@ -254,12 +355,14 @@ class ToolBox:
                  current_theme: Callable[[], str] | None = None,
                  set_theme: Callable[[str], Awaitable[str]] | None = None,
                  tasks: TaskStore | None = None,
-                 speaker: Callable[[], str | None] | None = None):
+                 speaker: Callable[[], str | None] | None = None,
+                 vault: Vault | None = None):
         self.upgrades = upgrades
         self.show_card = show_card
         self.current_theme = current_theme
         self.set_theme = set_theme
         self.tasks = tasks
+        self.vault = vault
         # Who's talking, for "my tasks". Nothing can tell voices apart yet, so None (= Craig);
         # a voice-identification step can pass a callable returning the speaker's name.
         self.speaker = speaker or (lambda: None)
@@ -273,6 +376,16 @@ class ToolBox:
                 return self._run_task_tool(name, args)
             except TaskError as e:
                 return str(e)
+        if name in _VAULT_TOOLS:
+            if self.vault is None:
+                return "The notes vault isn't connected here."
+            try:
+                return self._run_vault_tool(name, args)
+            except VaultError as e:
+                return str(e)
+            except OSError as e:
+                log.warning("vault: %s", e)
+                return f"I couldn't get to that note just now ({e.strerror or e})."
         card = None
         if name == "request_self_upgrade":
             text, card = self.upgrades.request(str(args.get("task", "")))
@@ -327,3 +440,28 @@ class ToolBox:
         if name == "add_person":
             return t.add_person(arg("name") or "")
         return t.list_people()
+
+    def _run_vault_tool(self, name: str, args: dict) -> str:
+        v = self.vault
+
+        def arg(key: str) -> str | None:
+            value = args.get(key)
+            return str(value) if value not in (None, "") else None
+
+        if name == "vault_projects":
+            return v.projects()
+        if name == "vault_read":
+            return v.read(arg("note") or "", arg("section"))
+        if name == "vault_add_task":
+            return v.add_task(arg("project") or "", arg("text") or "", arg("section"),
+                              arg("under"), bool(args.get("for_j")))
+        if name == "vault_update_task":
+            return v.update_task(arg("project") or "", arg("task") or "", arg("status"),
+                                 arg("text"))
+        if name == "vault_update_project":
+            return v.update_project(arg("project") or "", arg("status"), arg("progress"),
+                                    arg("next_step"), arg("log"))
+        if name == "vault_new_project":
+            return v.new_project(arg("name") or "", arg("about"), arg("status"))
+        return v.add_point(arg("note") or "", arg("heading") or "", arg("text") or "",
+                           arg("under"))

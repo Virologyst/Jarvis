@@ -86,6 +86,13 @@ speaker's name, ready for voice identification. Tasks have an optional due date 
 tools change only Jarvis's own notebook, like the theme choice, so they run without an approval
 card; deleting moves a task to a bin it can be restored from.
 
+## Sir's project notes (Obsidian)
+`brain/jarvis_brain/vault.py` reads and updates the project notes in Sir's Obsidian vault
+(`JARVIS_VAULT`): project status, progress and next step (note properties), checkbox tasks, a
+log per project, new projects from the template, and bullets on any note (its mind map). Additive
+only, every change logged, files rewritten in one step because Sir edits them at the same time.
+See [vault.md](vault.md).
+
 ## Roadmap
 1. Skeleton: wake word → STT → Claude → TTS on the dev PC. Built and tested end to end
    except the Claude call itself (needs an API key in `.env`). Measured on the dev PC
