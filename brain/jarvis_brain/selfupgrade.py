@@ -119,6 +119,34 @@ def protected_changes(paths: list[str]) -> list[str]:
     return [p for p in paths if is_protected(p)]
 
 
+# The API refuses a request whose strict tools have more optional parameters than this in
+# total (400 "Schemas contains too many optional parameters"). Every conversation would fail,
+# while /health still looks fine, so an upgrade that crosses it is blocked, not offered.
+MAX_STRICT_OPTIONAL = 24
+# Prints the upgraded brain's tool list as JSON, run inside the upgrade's worktree
+DUMP_TOOLS = "import json, jarvis_brain.tools as t; print(json.dumps(t.TOOLS))"
+
+
+def tool_schema_problems(tools: list[dict]) -> list[str]:
+    """Reasons the API would reject these tool definitions outright (empty list = fine)."""
+    problems = []
+    optional = 0
+    for tool in tools:
+        if not tool.get("strict"):
+            continue
+        schema = tool.get("input_schema") or {}
+        required = set(schema.get("required") or [])
+        optional += sum(1 for p in (schema.get("properties") or {}) if p not in required)
+    if optional > MAX_STRICT_OPTIONAL:
+        problems.append(f"the tools have {optional} optional settings and the API allows "
+                        f"{MAX_STRICT_OPTIONAL}, so every conversation would fail")
+    names = [t.get("name") for t in tools]
+    dupes = sorted({n for n in names if names.count(n) > 1})
+    if dupes:
+        problems.append("two tools share a name: " + ", ".join(map(str, dupes)))
+    return problems
+
+
 def find_claude() -> list[str] | None:
     """Command to run Claude Code: JARVIS_CLAUDE_CODE, then PATH, then the native install."""
     env = os.environ.get("JARVIS_CLAUDE_CODE")
@@ -212,8 +240,11 @@ class UpgradeManager:
     def __init__(self, repo: Path, gate: ApprovalGate, announce: Announce,
                  claude_cmd: list[str] | None = None, checks: list[list[str]] | None = None,
                  python: str = sys.executable, timeout_s: float | None = None,
-                 restart: Callable[[], None] | None = None):
+                 restart: Callable[[], None] | None = None,
+                 tool_check: list[str] | None = None):
         self.repo = repo
+        # Prints the upgraded tool list as JSON (see tool_schema_problems)
+        self.tool_check = tool_check or [python, "-c", DUMP_TOOLS]
         self.gate = gate
         self.announce = announce
         self.claude_cmd = claude_cmd
@@ -468,6 +499,20 @@ class UpgradeManager:
             job.tests_ok &= rc == 0
             report.append(f"$ {' '.join(check)}\n(exit {rc})\n{out}")
         (logs / "tests.txt").write_text("\n\n".join(report), encoding="utf-8")
+
+        # Tests can pass while the API would still refuse the new tools on every request
+        rc, out = await run(self.tool_check, wt, env=env, timeout=120)
+        try:
+            tools = json.loads(out.strip().splitlines()[-1]) if rc == 0 and out.strip() else None
+        except ValueError:
+            tools = None
+        problems = (tool_schema_problems(tools) if isinstance(tools, list)
+                    else ["I couldn't load the upgraded tool list to check it"])
+        if problems:
+            job.status = "blocked"
+            job.summary = ("The change would break me: " + "; ".join(problems) +
+                           ". So I won't offer to apply it. " + job.summary)
+            return
         job.status = "ready"
 
     def _env(self, wt: Path) -> dict:

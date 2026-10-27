@@ -15,9 +15,12 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from jarvis_brain.approvals import ApprovalGate  # noqa: E402
 from jarvis_brain.selfupgrade import (  # noqa: E402
-    ALLOWED_TOOLS, DISALLOWED_TOOLS, HEALTH_MARKER, UpgradeManager, _parse_claude_output,
-    is_protected,
+    ALLOWED_TOOLS, DISALLOWED_TOOLS, HEALTH_MARKER, MAX_STRICT_OPTIONAL, UpgradeManager,
+    _parse_claude_output, is_protected, tool_schema_problems,
 )
+
+# Stands in for "load the upgraded brain's tools": prints FAKE_TOOLS (JSON), default none
+FAKE_TOOL_CHECK = [sys.executable, "-c", "import os; print(os.environ.get('FAKE_TOOLS', '[]'))"]
 
 FAKE_CLAUDE = r'''
 import json, os, pathlib, sys
@@ -68,7 +71,7 @@ def setup(tmp_path, monkeypatch):
         gate = ApprovalGate(store=repo / "data" / "approvals.json")
         mgr = UpgradeManager(repo, gate, announce, claude_cmd=[sys.executable, str(fake)],
                              checks=[[sys.executable, "-c", "print('tests ok')"]],
-                             restart=lambda: restarts.append(1))
+                             restart=lambda: restarts.append(1), tool_check=FAKE_TOOL_CHECK)
         gate.restore()
         return gate, mgr
 
@@ -293,3 +296,54 @@ def test_saved_cards_hold_no_code_and_unknown_kinds_are_dropped(tmp_path) -> Non
     gate3 = ApprovalGate(store=store)
     gate3.register("thing", lambda card: None)       # owner says it no longer applies
     assert gate3.restore() == 0
+
+
+# ---- tool definitions the API would refuse ----------------------------------
+
+def _tool(name: str, optional: int) -> dict:
+    props = {f"p{i}": {"type": "string"} for i in range(optional)}
+    return {"name": name, "strict": True,
+            "input_schema": {"type": "object", "properties": props, "required": []}}
+
+
+def test_tool_schema_limits() -> None:
+    assert tool_schema_problems([_tool("a", 12), _tool("b", 12)]) == []
+    over = tool_schema_problems([_tool("a", 13), _tool("b", 13)])   # 26: what broke Jarvis
+    assert over and "26 optional" in over[0]
+    assert tool_schema_problems([_tool("a", 0), _tool("a", 0)])     # duplicate names
+    loose = dict(_tool("c", 30), strict=False)                       # only strict tools count
+    assert tool_schema_problems([loose]) == []
+
+
+def test_jarvis_own_tools_fit_the_api_limits() -> None:
+    from jarvis_brain.tools import TOOLS
+    assert tool_schema_problems(TOOLS) == []
+
+
+def test_upgrade_that_breaks_the_tools_is_blocked(setup, monkeypatch) -> None:
+    repo, gate, mgr, said, restarts = setup
+    monkeypatch.setenv("FAKE_TOOLS", json.dumps([_tool("a", MAX_STRICT_OPTIONAL + 2)]))
+
+    async def flow():
+        _, card = mgr.request("Add a to-do list")
+        await gate.decide(card.card_id, "approve")
+        await wait_done(mgr)
+        assert mgr.job.status == "blocked", mgr.job
+        assert "optional settings" in mgr.job.summary
+        assert said[-1][1].kind == "info" and not gate.pending()   # nothing to approve
+        assert not (repo / "feature.txt").exists() and restarts == []
+
+    asyncio.run(flow())
+
+
+def test_upgrade_whose_tools_wont_load_is_blocked(setup, monkeypatch) -> None:
+    _, gate, mgr, _, _ = setup
+    monkeypatch.setenv("FAKE_TOOLS", "not json")
+
+    async def flow():
+        _, card = mgr.request("Add a to-do list")
+        await gate.decide(card.card_id, "approve")
+        await wait_done(mgr)
+        assert mgr.job.status == "blocked" and "couldn't load" in mgr.job.summary
+
+    asyncio.run(flow())

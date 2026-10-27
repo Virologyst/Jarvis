@@ -240,7 +240,11 @@ def test_convert_reports_ambiguity() -> None:
 def test_time_tools_are_offered() -> None:
     tools = {t["name"]: t for t in TOOLS}
     assert {"get_time", "convert_time"} <= tools.keys()
-    assert tools["convert_time"]["input_schema"]["required"] == ["time"]
+    schema = tools["convert_time"]["input_schema"]
+    # Every field is sent (the API caps optional ones); only "time" may not be left empty
+    assert set(schema["required"]) == set(schema["properties"])
+    assert "Empty if not given" not in schema["properties"]["time"]["description"]
+    assert "Empty if not given" in schema["properties"]["from_place"]["description"]
 
 
 @needs_tz

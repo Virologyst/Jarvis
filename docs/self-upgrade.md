@@ -55,6 +55,7 @@ Restarting the brain doesn't lose an upgrade:
 |---|---|
 | Nothing runs without an approval tap: start, apply, undo | `selfupgrade.py` via `approvals.py` |
 | A saved card is removed from disk before its action runs, so a crash can't replay it | `approvals.py` |
+| An upgrade whose tools the API would refuse (over 24 optional settings across strict tools, or duplicate names) is blocked, not offered: tests passing isn't enough | `tool_schema_problems` in `selfupgrade.py` |
 | Claude Code works in a separate worktree, never the live checkout | `selfupgrade.py` |
 | Claude Code's tools: edit files, run pytest, read-only git. No web, push, commit, reset, rm, pip | `ALLOWED_TOOLS` / `DISALLOWED_TOOLS` |
 | Claude Code uses the Max login, never Jarvis's API key (removed from its environment) | `UpgradeManager._env` |

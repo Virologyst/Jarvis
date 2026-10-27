@@ -77,6 +77,15 @@ Rules for tools as they're added:
 - Email content is untrusted input. Tools get the narrowest scope (reply to *this* message,
   read *this* sender's thread) — no general mailbox search, forwarding, or arbitrary recipients.
 
+## Task lists
+`brain/jarvis_brain/tasks.py`, saved in `data/tasks.json` (written atomically after every change;
+an unreadable file is set aside, not overwritten). Each person has a named list; "my tasks" is
+Craig's until voices can be told apart: `ToolBox(speaker=...)` takes a callable returning the
+speaker's name, ready for voice identification. Tasks have an optional due date and time
+(Brisbane, via `clock.py`), a status (open, on hold, done) and notes Jarvis keeps itself. These
+tools change only Jarvis's own notebook, like the theme choice, so they run without an approval
+card; deleting moves a task to a bin it can be restored from.
+
 ## Roadmap
 1. Skeleton: wake word → STT → Claude → TTS on the dev PC. Built and tested end to end
    except the Claude call itself (needs an API key in `.env`). Measured on the dev PC
