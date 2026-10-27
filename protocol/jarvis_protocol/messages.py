@@ -14,7 +14,7 @@ __all__ = [
     "Hello", "Welcome", "ListenStart", "ListenEnd", "ListenCancel",
     "State", "Transcript", "ReplyText", "AudioStart", "AudioEnd",
     "Card", "Decision", "Error", "WakeCheck", "WakeResult",
-    "UserInput", "SetTheme", "Emote", "CardDone", "encode", "decode",
+    "UserInput", "SetTheme", "ListenMode", "Emote", "CardDone", "encode", "decode",
 ]
 
 _REGISTRY: dict[str, type] = {}
@@ -40,7 +40,8 @@ class Hello:
 @_message("listen_start")
 @dataclass
 class ListenStart:
-    """Mic audio follows as binary frames. reason: 'wake' | 'button' | 'key'."""
+    """Mic audio follows as binary frames. reason: 'wake' | 'button' | 'key' | 'follow_up' | 'permanent'
+    (any voice, while permanent listening is on)."""
     reason: str = "button"
 
 
@@ -84,6 +85,19 @@ class SetTheme:
     """Both ways: the brain tells a terminal which theme to show (after "switch to the eye
     theme"), and a terminal tells the brain when someone picks one on screen."""
     theme: str
+
+
+@_message("listen_mode")
+@dataclass
+class ListenMode:
+    """Both ways, like SetTheme: permanent listening on or off for this terminal.
+
+    The terminal asks (the toggle on the screen; quiet=True after a reconnect, so nothing is
+    said), the brain switches (or hears "listen to me from now on") and tells the terminal.
+    While on, the terminal answers anything said to it without waiting for "hey Jarvis".
+    """
+    on: bool
+    quiet: bool = False
 
 
 @_message("decision")

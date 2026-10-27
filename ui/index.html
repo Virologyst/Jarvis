@@ -91,12 +91,31 @@
     cursor: pointer; opacity: .55; }
   #theme-btn:hover { opacity: 1; }
 
+  /* Permanent listening: the toggle doubles as the indicator (a glowing pill while it's on) */
+  #listen-btn { position: fixed; top: 10px; right: 58px; z-index: 20; height: 40px; min-width: 40px;
+    padding: 0 10px; border-radius: 20px; border: 1px solid var(--border); background: #0008;
+    font-size: 15px; cursor: pointer; opacity: .55; display: flex; align-items: center; gap: 8px;
+    touch-action: manipulation; }
+  #listen-btn:hover { opacity: 1; }
+  #listen-btn .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); flex: none; }
+  #listen-btn .label { display: none; font-size: 13px; letter-spacing: .1em; text-transform: uppercase; }
+  body.always #listen-btn { opacity: 1; border-color: var(--listen); background: #0d2a1fcc;
+    color: var(--listen); box-shadow: 0 0 16px rgba(61,220,151,.4); }
+  body.always #listen-btn .label { display: inline; }
+  body.always #listen-btn .dot { background: var(--listen); animation: always-pulse 1.6s ease-in-out infinite; }
+  @keyframes always-pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(61,220,151,.7); }
+    50% { box-shadow: 0 0 0 6px rgba(61,220,151,0); } }
+
   /* ===== Arc theme ===== */
   body[data-theme="arc"] { background: #000; }
   body[data-theme="arc"] #arc { display: block; cursor: pointer; }
   body[data-theme="arc"] main { display: block; }
   body[data-theme="arc"] .left { display: none; }
   body[data-theme="arc"] #theme-btn { border-color: #1d4a66; color: #9fe6ff; }
+  body[data-theme="arc"] #listen-btn { border-color: #1d4a66; color: #9fe6ff; }
+  body[data-theme="arc"].always #listen-btn { border-color: #7fdcff; background: rgba(0, 12, 20, .88);
+    color: #dff7ff; text-shadow: 0 0 8px #40beff; box-shadow: 0 0 18px rgba(64,190,255,.55); }
+  body[data-theme="arc"].always #listen-btn .dot { background: #7fdcff; }
   /* conversation fades in from the bottom; no boxes, no borders */
   body[data-theme="arc"] .right { position: fixed; left: 0; right: 0; bottom: 0; padding: 0 6vw 18px;
     pointer-events: none; gap: 10px; }
@@ -128,6 +147,7 @@
 <canvas id="arc" aria-label="Talk to Jarvis"></canvas>
 <div id="arc-status"></div>
 <button id="theme-btn" title="Change theme" aria-label="Change theme">◐</button>
+<button id="listen-btn" title="Permanent listening: off" aria-label="Permanent listening" aria-pressed="false"><span class="dot"></span><span class="label">Always listening</span></button>
 <main>
   <section class="left">
     <button id="talk" aria-label="Talk to Jarvis"><canvas id="eye"></canvas><span class="sub" id="sub">tap to talk</span></button>
@@ -164,6 +184,18 @@
     speaking: ["speaking", "Tap to interrupt"],
   };
   let ws, current = null, terminalState = "idle", brainState = "idle", connected = false;
+  let always = false;   // permanent listening (the terminal tells us; off until it does)
+
+  // ---------- permanent listening ----------
+  function applyListenMode(on) {
+    always = !!on;
+    document.body.classList.toggle("always", always);
+    $("listen-btn").setAttribute("aria-pressed", String(always));
+    $("listen-btn").title = "Permanent listening: " + (always ? "on (tap to stop)" : "off (tap to start)");
+    render();
+  }
+  // The brain switches it and says so; the button follows its answer
+  $("listen-btn").onclick = () => send({action: "listen_mode", on: !always});
 
   // ---------- themes ----------
   function applyTheme(name) {
@@ -186,8 +218,9 @@
             : (brainState === "thinking" || brainState === "speaking") ? brainState
             : terminalState === "waiting" ? "thinking" : "idle";
     document.body.dataset.state = s;
-    $("sub").textContent = labels[s][0];
-    $("status").textContent = labels[s][1];
+    const idleAlways = s === "idle" && always;
+    $("sub").textContent = idleAlways ? "always listening" : labels[s][0];
+    $("status").textContent = idleAlways ? "I'm listening — just talk" : labels[s][1];
     const mood = connected ? s : "offline";
     JarvisEye.mood(mood);
     JarvisArc.mood(mood);
@@ -251,6 +284,7 @@
         case "voice_level": JarvisArc.level(m.level); break;
         case "emote": JarvisArc.emote(m.emotion); break;
         case "set_theme": applyTheme(m.theme); break;
+        case "listen_mode": applyListenMode(m.on); break;
         case "terminal_state": terminalState = m.state; render(); break;
         case "state": brainState = m.state; render(); break;
         case "transcript": bubble("you", m.text); current = null; break;
