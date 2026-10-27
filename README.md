@@ -42,6 +42,24 @@ Open http://localhost:8080. Say "hey Jarvis", tap the button, or press Enter in 
 terminal window. Useful flags: `--no-wake` (button only), `--list-devices`,
 `--mic <n>` / `--speaker <n>`, `-v` for debug logs.
 
+## Set up the brain PC (starts at boot, no login needed)
+
+On the always-on Windows PC, as the account the brain runs as, in PowerShell opened with
+**Run as Administrator**:
+
+```powershell
+git clone https://github.com/Virologyst/Jarvis.git; cd Jarvis
+powershell -ExecutionPolicy Bypass -File brain\install.ps1
+# put ANTHROPIC_API_KEY=... in .env, then run the script again
+```
+
+It registers a "Jarvis brain" scheduled task that runs the supervisor at every boot (needed for
+self-upgrades and their rollback), opens the port on the private network, stops the PC
+sleeping, then starts the brain and checks it answers. Logs: `logs\brain.log`. Update later
+with `git pull` then `Stop-ScheduledTask -TaskName "Jarvis brain"; Start-ScheduledTask -TaskName "Jarvis brain"`
+(or re-run the script if dependencies changed). Don't also start the brain by hand: two
+brains can't share the port.
+
 ## Set up a Pi terminal
 
 ```bash

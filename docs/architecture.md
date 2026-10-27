@@ -4,7 +4,7 @@
 
 | Device | Role |
 |---|---|
-| **Brain PC** (Windows, RTX 4090, always on) | Runs the brain as a Windows service under its own `jarvis` account. Shared with the apprentice for 3D printing under a separate standard account. |
+| **Brain PC** (Windows, RTX 4090, always on) | Runs the brain under its supervisor as the "Jarvis brain" scheduled task (at boot, no login, its own `Jarvis` account; `brain/install.ps1`). Shared with the apprentice for 3D printing under a separate standard account. |
 | **Pi 5 + touchscreen + USB speakerphone** (another room) | A terminal: wake word, mic, speaker, kiosk page. |
 | **Dev PC** (Craig's, RTX 5090) | Where Jarvis is built. Runs brain + terminal together while developing; later just a browser/terminal. |
 

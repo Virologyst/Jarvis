@@ -72,7 +72,9 @@ approval gate, which upgrades can't change.
 
 ## Running it
 
-The brain must run under the supervisor for upgrades to restart it:
+The brain must run under the supervisor for upgrades to restart it. On the brain PC the
+"Jarvis brain" scheduled task does that at every boot (set up by `brain\install.ps1`; see the
+README). By hand, for testing:
 
 ```
 .venv\Scripts\python -m jarvis_brain.supervisor
