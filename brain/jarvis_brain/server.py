@@ -10,6 +10,7 @@ handled here in code and never reaches Claude, and so is switching permanent lis
 off ("listen to me from now on" / "stop listening"); while it's on, noise and scraps are dropped.
 Task reminders (reminders.py) are said unprompted on every terminal once it's quiet, and the
 terminal then listens for an answer as it does after a reply.
+A terminal that shares its drive (Hello.files) answers the file tools' FileRequests for it.
 """
 
 from __future__ import annotations
@@ -26,14 +27,15 @@ import anthropic
 from aiohttp import WSMsgType, web
 
 from jarvis_protocol import (
-    AudioEnd, AudioStart, Card, CardDone, Decision, Emote, Error, Hello, ListenCancel, ListenEnd,
-    ListenMode, ListenStart, ReplyText, SetTheme, State, Transcript, UserInput, WakeCheck, WakeResult,
-    Welcome, decode, encode,
+    AudioEnd, AudioStart, Card, CardDone, Decision, Emote, Error, FileReply, FileRequest, Hello,
+    ListenCancel, ListenEnd, ListenMode, ListenStart, ReplyText, SetTheme, State, Transcript,
+    UserInput, WakeCheck, WakeResult, Welcome, decode, encode,
 )
 
 from .approvals import ApprovalGate
 from .config import REPO_ROOT, Settings
 from .emotions import TagStripper, parse_sentence
+from .files import FileAccessError
 from .listenmode import addressed, is_noise, listen_mode_command
 from .llm import Conversation
 from .reminders import ReminderService
@@ -58,6 +60,8 @@ MAX_IMAGES = 5             # pictures per typed message
 IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 WS_MAX_BYTES = 32 * 1024 * 1024
 SPEECH_CACHE_CHARS = 40    # short sentences ("Yes, Sir?") are synthesised once and kept
+FILE_REPLY_S = 20.0        # a terminal's answer to a file request (searches stop at 8 s)
+MAX_FILE_REPLY_CHARS = 40_000
 
 
 class Brain:
@@ -113,6 +117,11 @@ class Brain:
         await self.broadcast(CardDone(card_id))
         return result
 
+    def file_terminals(self) -> dict:
+        """Connected terminals that let Jarvis read their drives: name -> (op, args) -> text."""
+        return {s.terminal_id: s.remote_file for s in list(self.sessions)
+                if s.shares_files and not s.ws.closed}
+
     async def broadcast(self, msg) -> None:
         for s in list(self.sessions):
             await s.send(msg)
@@ -133,8 +142,12 @@ class TerminalSession:
         self.terminal_id = "unknown"
         self.theme = THEMES[DEFAULT_THEME]
         s = brain.settings
+        self.shares_files = False             # its Hello said the brain may read its drive
+        self._file_waits: dict[str, asyncio.Future] = {}   # FileRequests awaiting a FileReply
         tools = ToolBox(brain.upgrades, self.send, current_theme=lambda: self.theme.title,
-                        set_theme=self.set_theme, tasks=brain.tasks)
+                        set_theme=self.set_theme, tasks=brain.tasks, approvals=brain.approvals,
+                        terminal_id=lambda: self.terminal_id,
+                        file_terminals=lambda: brain.file_terminals())
         self.conversation = Conversation(brain.client, s.model, s.effort, s.idle_reset_minutes,
                                          tools=TOOLS, run_tool=tools.run)
         self.listening = False
@@ -212,9 +225,16 @@ class TerminalSession:
 
     async def on_text(self, raw: str) -> None:
         msg = decode(raw)
+        if isinstance(msg, FileReply):
+            waiting = self._file_waits.get(msg.request_id)
+            if waiting and not waiting.done():
+                waiting.set_result((bool(msg.ok), str(msg.text)[:MAX_FILE_REPLY_CHARS]))
+            return
         if isinstance(msg, Hello):
             self.terminal_id = msg.terminal_id
-            log.info("terminal connected: %s", self.terminal_id)
+            self.shares_files = bool(msg.files)
+            log.info("terminal connected: %s%s", self.terminal_id,
+                     " (sharing its files, read-only)" if self.shares_files else "")
             await self.send(Welcome())
             self.theme = self.brain.themes.get(self.terminal_id)
             await self.send(SetTheme(self.theme.name))
@@ -256,6 +276,30 @@ class TerminalSession:
             said = await self.set_listen_mode(msg.on)
             if not msg.quiet and not self.busy:
                 asyncio.create_task(self.speak_aside(said))
+
+    async def remote_file(self, op: str, args: dict) -> str:
+        """Ask this terminal to read something on its own drive (it checks the path itself).
+        Raises FileAccessError with what to say if it refuses or doesn't answer."""
+        request_id = uuid.uuid4().hex
+        waiting = asyncio.get_running_loop().create_future()
+        self._file_waits[request_id] = waiting
+        try:
+            await self.send(FileRequest(request_id, op, args))
+            ok, text = await asyncio.wait_for(waiting, FILE_REPLY_S)
+        except asyncio.TimeoutError:
+            raise FileAccessError(f"The terminal {self.terminal_id} didn't answer in time.") from None
+        finally:
+            self._file_waits.pop(request_id, None)
+        if not ok:
+            raise FileAccessError(text)
+        return text
+
+    def close_file_requests(self) -> None:
+        """The terminal went away: tell anything waiting on it."""
+        for waiting in self._file_waits.values():
+            if not waiting.done():
+                waiting.set_exception(FileAccessError(
+                    f"The terminal {self.terminal_id} disconnected before answering."))
 
     def on_audio(self, data: bytes) -> None:
         if self.listening and len(self.audio) < MAX_UTTERANCE_S * 16_000 * 2:
@@ -468,6 +512,7 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                 session.on_audio(msg.data)
     finally:
         brain.sessions.discard(session)
+        session.close_file_requests()
         await session._cancel_turn()
         if session._reminding:
             session._reminding.cancel()

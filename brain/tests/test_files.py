@@ -16,6 +16,7 @@ from jarvis_brain.files import FileAccessError, FileReader  # noqa: E402
 from jarvis_brain.persona import SYSTEM_PROMPT  # noqa: E402
 from jarvis_brain.selfupgrade import tool_schema_problems  # noqa: E402
 from jarvis_brain.tools import TOOLS, ToolBox  # noqa: E402
+from jarvis_protocol import fileaccess  # noqa: E402
 
 
 @pytest.fixture
@@ -218,8 +219,10 @@ def test_nothing_changes_on_disk(drive: Path) -> None:
     assert not (vault / "New.md").exists()
 
 
-def test_module_has_no_writing_operations() -> None:
-    source = Path(files_mod.__file__).read_text(encoding="utf-8")
+@pytest.mark.parametrize("module", [files_mod, fileaccess])
+def test_reading_modules_have_no_writing_operations(module) -> None:
+    # The reader is shared with the terminals, which must stay read-only
+    source = Path(module.__file__).read_text(encoding="utf-8")
     for op in ["write_", ".write(", "unlink(", "rmdir(", "rmtree", "rename(", "os.replace",
                "mkdir(", "touch(", "chmod(", "shutil", "subprocess", "remove(", '"w"', "'w'",
                '"a"', "'a'", "open(path)", "os.system"]:
@@ -227,13 +230,14 @@ def test_module_has_no_writing_operations() -> None:
     assert source.count("open(") == source.count('open(path, "rb")')
 
 
-def test_file_tools_are_read_only_and_show_no_cards(drive: Path) -> None:
+def test_reading_tools_show_no_cards_and_nothing_deletes(drive: Path) -> None:
     names = {t["name"] for t in TOOLS}
-    assert {"list_directory", "read_file", "search_files"} <= names
-    for word in ("write", "delete_file", "move", "rename", "create_file", "save_file"):
-        assert not any(word in n for n in names), word
+    assert {"list_directory", "read_file", "search_files", "list_file_devices"} <= names
+    for word in ("delete", "remove", "erase"):
+        assert not any(word in n for n in names if n != "delete_task"), word
     assert tool_schema_problems(TOOLS) == []
-    for name in ("list_directory", "read_file", "search_files"):
+    for name in ("list_directory", "read_file", "search_files", "write_file", "edit_file",
+                 "create_folder", "move_file", "list_file_devices"):
         assert name in SYSTEM_PROMPT
     assert "summarise" in SYSTEM_PROMPT
 

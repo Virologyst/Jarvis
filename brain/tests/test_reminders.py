@@ -381,7 +381,7 @@ def test_session_waits_until_quiet_then_speaks_with_a_follow_up(monkeypatch) -> 
 
     tts = NS(sample_rate=16000, synthesize=lambda text, voice, speed: b"\0" * 3200)
     brain = NS(settings=NS(model="m", effort="low", idle_reset_minutes=10), client=None,
-               upgrades=None, tasks=None, tts=tts)
+               upgrades=None, tasks=None, tts=tts, approvals=None)
     monkeypatch.setattr(server, "REMINDER_GAP_S", 0.0)
 
     async def go():

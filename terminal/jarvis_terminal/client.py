@@ -8,6 +8,9 @@ Local states:
 Permanent listening (switched by voice through the brain, or the toggle on the screen): while
 idle, any clear voice starts listening instead of "hey Jarvis". It still needs a run of voiced
 frames, and never triggers while Jarvis is speaking or just after, so it doesn't hear itself.
+
+On Windows the terminal also lets the brain read its drive (FileRequest -> FileReply, read-only,
+with its own privacy checks; see files.py), so Jarvis can read notes kept on this machine.
 """
 
 from __future__ import annotations
@@ -27,8 +30,9 @@ import numpy as np
 from aiohttp import WSMsgType, web
 
 from jarvis_protocol import (
-    AudioEnd, AudioStart, Decision, Emote, Hello, ListenCancel, ListenEnd, ListenMode, ListenStart,
-    ReplyText, SetTheme, State, Transcript, UserInput, WakeCheck, WakeResult, decode, encode,
+    AudioEnd, AudioStart, Decision, Emote, FileReply, FileRequest, Hello, ListenCancel, ListenEnd,
+    ListenMode, ListenStart, ReplyText, SetTheme, State, Transcript, UserInput, WakeCheck,
+    WakeResult, decode, encode,
 )
 
 from .audio import Microphone, Player, refresh_devices, rms
@@ -91,8 +95,9 @@ def _load_vad():
 class Terminal:
     def __init__(self, brain_url: str, terminal_id: str, ui_port: int,
                  wake_threshold: float, use_wake: bool, mic_device=None, speaker_device=None,
-                 eye=None):
+                 eye=None, files=None):
         self.eye = eye  # jarvis_terminal.eye.Eye, or None
+        self.files = files  # jarvis_terminal.files.TerminalFiles (read-only), or None
         self.brain_url = brain_url
         self.terminal_id = terminal_id
         self.ui_port = ui_port
@@ -190,6 +195,21 @@ class Terminal:
         fresh = time.monotonic() - pending[1] < WAKE_CHECK_MAX_AGE_S
         if msg.ok and fresh and self.state == "idle":
             await self.start_listening("wake_phrase", with_preroll=True)
+
+    @property
+    def shares_files(self) -> bool:
+        return bool(self.files and self.files.available)
+
+    async def on_file_request(self, msg: FileRequest) -> None:
+        """The brain wants to read something on this machine: answer it (read-only), off the
+        event loop so audio keeps flowing during a long search."""
+        if self.shares_files:
+            ok, text = await asyncio.to_thread(self.files.handle, msg.op, msg.args)
+        else:
+            ok, text = False, "This terminal isn't sharing its files."
+        ws = self.brain_ws
+        if ws is not None and not ws.closed:
+            await ws.send_str(encode(FileReply(msg.request_id, ok, text)))
 
     async def stop_listening(self, cancel: bool = False, why: str = "") -> None:
         now = time.monotonic()
@@ -388,7 +408,8 @@ class Terminal:
                                                max_msg_size=4 * 1024 * 1024) as ws:
                         self.brain_ws = ws
                         delay = 1.0
-                        await ws.send_str(encode(Hello(self.terminal_id)))
+                        await ws.send_str(encode(Hello(self.terminal_id,
+                                                       files=self.shares_files)))
                         if self.always_listening:   # the brain restarted: carry on, quietly
                             await ws.send_str(encode(ListenMode(True, quiet=True)))
                         await self.to_ui({"type": "connection", "connected": True})
@@ -415,6 +436,9 @@ class Terminal:
         if isinstance(msg, WakeResult):
             await self.on_wake_result(msg)
             return  # nothing for the page to show
+        if isinstance(msg, FileRequest):
+            asyncio.create_task(self.on_file_request(msg))
+            return  # nor for this
         if isinstance(msg, Emote):
             # Show it when its sentence is actually heard, not when it arrives
             delay = self.player.buffered_seconds

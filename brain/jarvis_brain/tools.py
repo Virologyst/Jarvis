@@ -2,20 +2,23 @@
 
 Every tool that changes anything outside Jarvis only *proposes* it: the handler returns a card for
 the screen and the real work runs after someone taps Approve (see approvals.py). Jarvis's own
-state (the screen theme, the task lists) changes directly, and the file tools only read. Add new
-tools here.
+state (the screen theme, the task lists) changes directly. Reading files (on the brain or a
+terminal) runs directly; writing files on the brain is proposed on a card like everything else.
+Add new tools here.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from collections.abc import Awaitable, Callable
 
 from jarvis_protocol import Card
 
 from . import clock
 from .files import FileAccessError, FileReader
+from .filewrite import FileWriter
 from .tasks import TaskError, TaskStore
 from .themes import THEMES, describe
 
@@ -276,49 +279,126 @@ TOOLS += [
 _TASK_TOOLS = {"add_task", "tasks_for_day", "list_tasks", "find_task", "update_task",
                "delete_task", "task_notes", "set_task_reminder", "add_person", "list_people"}
 
-# --- Files (files.py) ---------------------------------------------------------------------------
-# Strictly read-only, on the C: drive, with Jarvis's own settings and machinery and common secret
-# stores excluded; reading changes nothing, so these run without a card.
+# --- Files (files.py, filewrite.py, and terminals' jarvis_terminal/files.py) --------------------
+# Reading is read-only and runs without a card, on the brain's C: drive or on a terminal that
+# shares its drive (the terminal applies the same privacy checks itself). Writing is on the
+# brain only, and every write is just proposed: it happens after someone approves the card.
+# Nothing deletes files. Jarvis's own code, settings and machinery and secret stores are
+# refused everywhere.
 
 _PATH = {"type": "string",
          "description": "Full Windows path on the C drive, e.g. 'C:\\Users\\Craig\\Documents'."}
+_DEVICE = {"type": "string",
+           "description": ("Which machine: 'brain' (the machine you run on), 'this terminal' "
+                           "(the one you're being spoken to through), or a terminal's name from "
+                           "list_file_devices. Empty: the brain if the path exists there, "
+                           "otherwise this terminal.")}
+_BRAIN_PATH = {"type": "string",
+               "description": "Full Windows path on the brain's C drive."}
 
 TOOLS += [
     {
+        "name": "list_file_devices",
+        "description": ("Which machines' files you can use: the brain, and the terminals "
+                        "sharing their drives right now (by name, and which one is this one)."),
+        "input_schema": _schema(),
+        "strict": True,
+    },
+    {
         "name": "list_directory",
-        "description": "List the folders and files in a folder on the C drive (read-only).",
-        "input_schema": _schema({"path": _PATH}, ["path"]),
+        "description": ("List the folders and files in a folder on the C drive of the brain or "
+                        "a terminal (read-only)."),
+        "input_schema": _schema({"path": _PATH, "device": _DEVICE}, ["path"]),
         "strict": True,
     },
     {
         "name": "read_file",
         "description": (
-            "Read a text file on the C drive (read-only): Markdown notes, text, Obsidian canvas "
-            "mind maps (given as cards and connections), JSON and other text formats. Long files "
-            "come back in parts; the result says which start to use to read on. Binary files "
-            "(PDFs, images, Word documents) aren't read; the result says what they are."),
+            "Read a text file on the C drive of the brain or a terminal (read-only): Markdown "
+            "notes, text, Obsidian canvas mind maps (given as cards and connections), JSON and "
+            "other text formats. Long files come back in parts; the result says which start to "
+            "use to read on. Binary files (PDFs, images, Word documents) aren't read; the result "
+            "says what they are."),
         "input_schema": _schema(
             {"path": _PATH,
              "start": {"type": "integer",
-                       "description": "Character to start from: 0 for the beginning."}},
+                       "description": "Character to start from: 0 for the beginning."},
+             "device": _DEVICE},
             ["path", "start"]),
         "strict": True,
     },
     {
         "name": "search_files",
         "description": (
-            "Find files on the C drive whose names contain all the words in query, and with "
-            "contents true, files whose text contains them too (slower). Searches under root, or "
-            "the home folder if root is empty; give the Obsidian vault's folder when you know it."),
+            "Find files on the C drive of the brain or a terminal whose names contain all the "
+            "words in query, and with contents true, files whose text contains them too "
+            "(slower). Searches under root, or the home folder if root is empty; give the "
+            "Obsidian vault's folder when you know it."),
         "input_schema": _schema(
             {"query": {"type": "string", "description": "Words to look for."},
              "root": {"type": "string", "description": "Folder to search under."},
-             "contents": {"type": "boolean", "description": "True to search inside text files."}},
+             "contents": {"type": "boolean", "description": "True to search inside text files."},
+             "device": _DEVICE},
             ["query"]),
+        "strict": True,
+    },
+    {
+        "name": "write_file",
+        "description": (
+            "Create a text file on the brain's C drive (notes .md, .txt, canvas, JSON, CSV and "
+            "similar), replace all of an existing one's text, or add to its end. Only on the "
+            "brain, never on a terminal. Shows an approval card with what will be written; "
+            "nothing is written until it's approved. Missing folders on the way are created."),
+        "input_schema": _schema(
+            {"path": _BRAIN_PATH,
+             "text": {"type": "string", "description": "The text to write."},
+             "mode": {"type": "string", "enum": ["create", "replace", "append"],
+                      "description": ("create (default) = a new file, never over an existing "
+                                      "one; replace = all of an existing file's text; append = "
+                                      "add to the end of an existing file.")}},
+            ["path", "text"]),
+        "strict": True,
+    },
+    {
+        "name": "edit_file",
+        "description": (
+            "Change one exact piece of text in an existing text file on the brain's C drive, "
+            "e.g. fix a line in a note. Read the file first and copy the text to change exactly; "
+            "it must appear once. Shows an approval card; nothing changes until it's approved."),
+        "input_schema": _schema(
+            {"path": _BRAIN_PATH,
+             "find": {"type": "string", "description": "The exact text to change."},
+             "replace": {"type": "string", "description": "What it becomes (can be empty)."}},
+            ["path", "find", "replace"]),
+        "strict": True,
+    },
+    {
+        "name": "create_folder",
+        "description": ("Create a folder on the brain's C drive. Shows an approval card; "
+                        "nothing is created until it's approved."),
+        "input_schema": _schema({"path": _BRAIN_PATH}, ["path"]),
+        "strict": True,
+    },
+    {
+        "name": "move_file",
+        "description": (
+            "Move or rename a file or folder on the brain's C drive. Never replaces something "
+            "already there. Shows an approval card; nothing moves until it's approved."),
+        "input_schema": _schema(
+            {"path": _BRAIN_PATH,
+             "to": {"type": "string",
+                    "description": "The new full path, or a folder to move it into."}},
+            ["path", "to"]),
         "strict": True,
     },
 ]
 _FILE_TOOLS = {"list_directory", "read_file", "search_files"}
+_WRITE_TOOLS = {"write_file", "edit_file", "create_folder", "move_file"}
+# A terminal's file reader: (op, args) -> text, raising FileAccessError for refusals
+RemoteFiles = Callable[[str, dict], Awaitable[str]]
+_THIS_TERMINAL = {"this terminal", "this", "here", "terminal", "this one", "this device",
+                  "this computer", "this pc", "local"}
+_BRAIN = {"brain", "the brain", "server", "jarvis"}
 
 
 class ToolBox:
@@ -329,7 +409,10 @@ class ToolBox:
                  set_theme: Callable[[str], Awaitable[str]] | None = None,
                  tasks: TaskStore | None = None,
                  speaker: Callable[[], str | None] | None = None,
-                 files: FileReader | None = None):
+                 files: FileReader | None = None,
+                 approvals=None,
+                 terminal_id: Callable[[], str] | None = None,
+                 file_terminals: Callable[[], dict[str, RemoteFiles]] | None = None):
         self.upgrades = upgrades
         self.show_card = show_card
         self.current_theme = current_theme
@@ -339,12 +422,25 @@ class ToolBox:
         # a voice-identification step can pass a callable returning the speaker's name.
         self.speaker = speaker or (lambda: None)
         self.files = files if files is not None else FileReader()
+        self.writer = FileWriter(self.files)
+        self.approvals = approvals      # the ApprovalGate every file write goes through
+        # This conversation's terminal, and the connected terminals sharing their drives
+        self.terminal_id = terminal_id or (lambda: "")
+        self.file_terminals = file_terminals or dict
 
     async def run(self, name: str, args: dict) -> str:
-        log.info("tool %s %s", name, args)
+        log.info("tool %s %s", name, {k: (v[:80] + "..." if isinstance(v, str) and len(v) > 80
+                                          else v) for k, v in args.items()})
+        if name == "list_file_devices":
+            return self._describe_devices()
         if name in _FILE_TOOLS:
             try:
-                return await asyncio.to_thread(self._run_file_tool, name, args)
+                return await self._run_read_tool(name, args)
+            except FileAccessError as e:
+                return str(e)
+        if name in _WRITE_TOOLS:
+            try:
+                return await self._propose_write(name, args)
             except FileAccessError as e:
                 return str(e)
         if name in _TASK_TOOLS:
@@ -380,14 +476,98 @@ class ToolBox:
             await self.show_card(card)
         return text
 
+    # --- files --------------------------------------------------------------------------------
+
+    async def _run_read_tool(self, name: str, args: dict) -> str:
+        if name == "search_files":
+            clean = {"query": str(args.get("query", "")), "root": str(args.get("root") or ""),
+                     "contents": bool(args.get("contents"))}
+            path = clean["root"]
+        else:
+            clean = {"path": str(args.get("path", ""))}
+            if name == "read_file":
+                clean["start"] = int(args.get("start") or 0)
+            path = clean["path"]
+        device = self._pick_device(str(args.get("device") or ""), path)
+        if device is None:
+            return "[On the brain] " + await asyncio.to_thread(self._run_file_tool, name, clean)
+        terminal, remote = device
+        return f"[On the terminal {terminal}] " + await remote(name, clean)
+
     def _run_file_tool(self, name: str, args: dict) -> str:
         f = self.files
         if name == "list_directory":
-            return f.list_directory(str(args.get("path", "")))
+            return f.list_directory(args["path"])
         if name == "read_file":
-            return f.read_file(str(args.get("path", "")), int(args.get("start") or 0))
-        return f.search_files(str(args.get("query", "")), args.get("root") or None,
-                              bool(args.get("contents")))
+            return f.read_file(args["path"], args["start"])
+        return f.search_files(args["query"], args["root"] or None, args["contents"])
+
+    def _pick_device(self, device: str, path: str) -> tuple[str, RemoteFiles] | None:
+        """Which machine a read goes to: None for the brain, or (terminal name, its reader)."""
+        wanted = " ".join(device.lower().replace("_", " ").split())
+        terminals, here = self.file_terminals(), self.terminal_id()
+        if wanted in _BRAIN:
+            return None
+        if not wanted or wanted == "auto":
+            # The brain if the path is there, otherwise the terminal being spoken through
+            if not path or self._exists_on_brain(path) or here not in terminals:
+                return None
+            return here, terminals[here]
+        if wanted in _THIS_TERMINAL:
+            if here in terminals:
+                return here, terminals[here]
+            raise FileAccessError("This terminal isn't sharing its files with me (only Windows "
+                                  "terminals with file sharing on do). " + self._describe_devices())
+        exact = [n for n in terminals if n.lower() == wanted]
+        close = exact or [n for n in terminals if wanted in n.lower()]
+        if len(close) == 1:
+            return close[0], terminals[close[0]]
+        raise FileAccessError(f"No terminal called {device} is sharing files with me right now. "
+                              + self._describe_devices())
+
+    def _exists_on_brain(self, raw: str) -> bool:
+        try:
+            return os.path.lexists(self.files.normalise(raw))
+        except FileAccessError:
+            return False
+
+    def _describe_devices(self) -> str:
+        here = self.terminal_id()
+        names = sorted(self.file_terminals())
+        text = ("You can read files on the brain, and create, edit, move and rename files there "
+                "with approval. ")
+        if not names:
+            return text + "No terminals are sharing their files right now."
+        listed = ", ".join(f"{n} (this terminal)" if n == here else n for n in names)
+        text += f"Terminals sharing their files, read-only: {listed}."
+        if here and here not in names:
+            text += " This terminal isn't sharing its files."
+        return text
+
+    async def _propose_write(self, name: str, args: dict) -> str:
+        """Check a write and put it on an approval card; it runs only once approved."""
+        if self.approvals is None:
+            return "Changing files isn't available here."
+        w = self.writer
+        if name == "write_file":
+            plan = await asyncio.to_thread(w.write_text, str(args.get("path", "")),
+                                           str(args.get("text", "")), str(args.get("mode") or ""))
+        elif name == "edit_file":
+            plan = await asyncio.to_thread(w.edit_text, str(args.get("path", "")),
+                                           str(args.get("find", "")), str(args.get("replace", "")))
+        elif name == "create_folder":
+            plan = await asyncio.to_thread(w.create_folder, str(args.get("path", "")))
+        else:
+            plan = await asyncio.to_thread(w.move, str(args.get("path", "")),
+                                           str(args.get("to", "")))
+
+        async def action() -> str:
+            return await asyncio.to_thread(plan.apply)
+
+        card = self.approvals.propose(plan.title, plan.body, action)
+        await self.show_card(card)
+        return (f"An approval card is up on the brain's files: {plan.title}. Nothing changes "
+                "until it's approved.")
 
     def _run_task_tool(self, name: str, args: dict) -> str:
         t, me = self.tasks, self.speaker()

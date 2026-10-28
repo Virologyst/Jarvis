@@ -108,16 +108,41 @@ unless the task is over an hour past its deadline (or, with no deadline, 12 hour
 deleted and on-hold tasks stay quiet.
 
 ## Reading files
-`brain/jarvis_brain/files.py`: `list_directory`, `read_file` and `search_files`, mainly for
-Craig's Obsidian vault. Strictly read-only (files are only opened for reading), so no approval
-card. Paths must be absolute and on the C: drive; each is normalised and resolved (symlinks,
-junctions, `..`) and checked before and after resolving, so a link can't lead elsewhere.
-Refused, and left out of listings and searches: Jarvis's own checkout (settings, keys, task
-data, approval and upgrade machinery) and the upgrade worktrees, plus common secret stores
-(`.ssh`, `.aws`, `.claude`, browser profiles, Windows credential stores, `.env` files, key and
+`list_directory`, `read_file` and `search_files`, mainly for Craig's Obsidian vault (on his
+terminal, under `C:\Users\craig\Documents\Obsidian`). The reader is
+`protocol/jarvis_protocol/fileaccess.py`, shared by the brain (`brain/jarvis_brain/files.py`)
+and the terminals (`terminal/jarvis_terminal/files.py`), so both apply the same checks.
+Strictly read-only (files are only opened for reading), so no approval card. Paths must be
+absolute and on the C: drive; each is normalised and resolved (symlinks, junctions, `..`) and
+checked before and after resolving, so a link can't lead elsewhere. Refused, and left out of
+listings and searches: Jarvis's own checkout on that machine (settings, keys, task data,
+approval and upgrade machinery) and the upgrade worktrees, plus common secret stores (`.ssh`,
+`.aws`, `.claude`, browser profiles, Windows credential stores, `.env` files, key and
 password-database files). Reads return up to 12,000 characters with a note on where to read
 on; Obsidian canvas files come back as cards and connections; binary files are described, not
 read. Searches stop after 25 results or 8 seconds and skip system folders.
+
+### On a terminal
+A Windows terminal shares its drive by default (`--no-files` or `JARVIS_TERMINAL_FILES=0` turns
+it off; a Pi has no C: drive, so never does): its `Hello` says `files=True`, and the brain sends
+it `FileRequest(op, args)` for the three read operations, which the terminal checks and answers
+itself with a `FileReply` (20 s limit). The terminal answers only the ops in
+`TerminalFiles.ops`; anything else is refused, so a brain can't make it write. Each read tool
+takes a `device`: `brain`, `this terminal`, a terminal's name, or empty, meaning the brain if
+the path exists there and otherwise the terminal being spoken through. `list_file_devices`
+says which terminals are sharing. Results start with which machine they came from.
+
+## Writing files (brain only)
+`brain/jarvis_brain/filewrite.py`: `write_file` (create, replace or append), `edit_file` (change
+one exact passage), `create_folder` and `move_file` (move or rename; never over something
+already there). Nothing deletes. Each tool only plans the change and puts it on an approval
+card (`ApprovalGate.propose()`); it's made after approval, re-checked first. Refused: everything
+the reader refuses, plus Windows and program folders, AppData, hidden dot-folders, the top of
+the drive, and anything that runs: only text files (notes, text, canvas, JSON, CSV...) can be
+written, programs and scripts can't be moved or renamed into being, and a folder moves only if
+nothing inside it is private, a program or a link. Text is replaced atomically (written beside
+the file, then swapped in). Terminal writes can be added later as new `TerminalFiles.ops`, sent
+by the brain only from an approved card's action.
 
 ## Roadmap
 1. Skeleton: wake word → STT → Claude → TTS on the dev PC. Built and tested end to end
