@@ -107,6 +107,18 @@ idle terminal open the mic afterwards, and the reminder is added to that termina
 unless the task is over an hour past its deadline (or, with no deadline, 12 hours late); done,
 deleted and on-hold tasks stay quiet.
 
+## Reading files
+`brain/jarvis_brain/files.py`: `list_directory`, `read_file` and `search_files`, mainly for
+Craig's Obsidian vault. Strictly read-only (files are only opened for reading), so no approval
+card. Paths must be absolute and on the C: drive; each is normalised and resolved (symlinks,
+junctions, `..`) and checked before and after resolving, so a link can't lead elsewhere.
+Refused, and left out of listings and searches: Jarvis's own checkout (settings, keys, task
+data, approval and upgrade machinery) and the upgrade worktrees, plus common secret stores
+(`.ssh`, `.aws`, `.claude`, browser profiles, Windows credential stores, `.env` files, key and
+password-database files). Reads return up to 12,000 characters with a note on where to read
+on; Obsidian canvas files come back as cards and connections; binary files are described, not
+read. Searches stop after 25 results or 8 seconds and skip system folders.
+
 ## Roadmap
 1. Skeleton: wake word → STT → Claude → TTS on the dev PC. Built and tested end to end
    except the Claude call itself (needs an API key in `.env`). Measured on the dev PC

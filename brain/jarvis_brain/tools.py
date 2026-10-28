@@ -2,17 +2,20 @@
 
 Every tool that changes anything outside Jarvis only *proposes* it: the handler returns a card for
 the screen and the real work runs after someone taps Approve (see approvals.py). Jarvis's own
-state (the screen theme, the task lists) changes directly. Add new tools here.
+state (the screen theme, the task lists) changes directly, and the file tools only read. Add new
+tools here.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 
 from jarvis_protocol import Card
 
 from . import clock
+from .files import FileAccessError, FileReader
 from .tasks import TaskError, TaskStore
 from .themes import THEMES, describe
 
@@ -273,6 +276,50 @@ TOOLS += [
 _TASK_TOOLS = {"add_task", "tasks_for_day", "list_tasks", "find_task", "update_task",
                "delete_task", "task_notes", "set_task_reminder", "add_person", "list_people"}
 
+# --- Files (files.py) ---------------------------------------------------------------------------
+# Strictly read-only, on the C: drive, with Jarvis's own settings and machinery and common secret
+# stores excluded; reading changes nothing, so these run without a card.
+
+_PATH = {"type": "string",
+         "description": "Full Windows path on the C drive, e.g. 'C:\\Users\\Craig\\Documents'."}
+
+TOOLS += [
+    {
+        "name": "list_directory",
+        "description": "List the folders and files in a folder on the C drive (read-only).",
+        "input_schema": _schema({"path": _PATH}, ["path"]),
+        "strict": True,
+    },
+    {
+        "name": "read_file",
+        "description": (
+            "Read a text file on the C drive (read-only): Markdown notes, text, Obsidian canvas "
+            "mind maps (given as cards and connections), JSON and other text formats. Long files "
+            "come back in parts; the result says which start to use to read on. Binary files "
+            "(PDFs, images, Word documents) aren't read; the result says what they are."),
+        "input_schema": _schema(
+            {"path": _PATH,
+             "start": {"type": "integer",
+                       "description": "Character to start from: 0 for the beginning."}},
+            ["path", "start"]),
+        "strict": True,
+    },
+    {
+        "name": "search_files",
+        "description": (
+            "Find files on the C drive whose names contain all the words in query, and with "
+            "contents true, files whose text contains them too (slower). Searches under root, or "
+            "the home folder if root is empty; give the Obsidian vault's folder when you know it."),
+        "input_schema": _schema(
+            {"query": {"type": "string", "description": "Words to look for."},
+             "root": {"type": "string", "description": "Folder to search under."},
+             "contents": {"type": "boolean", "description": "True to search inside text files."}},
+            ["query"]),
+        "strict": True,
+    },
+]
+_FILE_TOOLS = {"list_directory", "read_file", "search_files"}
+
 
 class ToolBox:
     """Runs tool calls for one terminal's conversation; shows any cards on that terminal."""
@@ -281,7 +328,8 @@ class ToolBox:
                  current_theme: Callable[[], str] | None = None,
                  set_theme: Callable[[str], Awaitable[str]] | None = None,
                  tasks: TaskStore | None = None,
-                 speaker: Callable[[], str | None] | None = None):
+                 speaker: Callable[[], str | None] | None = None,
+                 files: FileReader | None = None):
         self.upgrades = upgrades
         self.show_card = show_card
         self.current_theme = current_theme
@@ -290,9 +338,15 @@ class ToolBox:
         # Who's talking, for "my tasks". Nothing can tell voices apart yet, so None (= Craig);
         # a voice-identification step can pass a callable returning the speaker's name.
         self.speaker = speaker or (lambda: None)
+        self.files = files if files is not None else FileReader()
 
     async def run(self, name: str, args: dict) -> str:
         log.info("tool %s %s", name, args)
+        if name in _FILE_TOOLS:
+            try:
+                return await asyncio.to_thread(self._run_file_tool, name, args)
+            except FileAccessError as e:
+                return str(e)
         if name in _TASK_TOOLS:
             if self.tasks is None:
                 raise RuntimeError("the task lists aren't available here")
@@ -325,6 +379,15 @@ class ToolBox:
         if card:
             await self.show_card(card)
         return text
+
+    def _run_file_tool(self, name: str, args: dict) -> str:
+        f = self.files
+        if name == "list_directory":
+            return f.list_directory(str(args.get("path", "")))
+        if name == "read_file":
+            return f.read_file(str(args.get("path", "")), int(args.get("start") or 0))
+        return f.search_files(str(args.get("query", "")), args.get("root") or None,
+                              bool(args.get("contents")))
 
     def _run_task_tool(self, name: str, args: dict) -> str:
         t, me = self.tasks, self.speaker()
