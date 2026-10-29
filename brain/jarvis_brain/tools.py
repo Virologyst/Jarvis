@@ -502,22 +502,16 @@ _VAULT_TOOLS = {"vault_projects", "vault_read", "vault_add_task", "vault_update_
                 "vault_update_project", "vault_new_project", "vault_add_point"}
 
 # The API allows at most 20 strict tools per request (and 24 optional settings across them).
-# Strict guarantees the input matches the schema, which matters for tools that change things
-# directly. These don't need it, so they're left loose, keeping room for new tools under the
-# limit (selfupgrade.py blocks an upgrade that crosses it): tools that only look something up,
-# whose handlers cope with a missing or odd value, and tools that only propose a card that Sir
-# reads before anything happens. A new tool that changes something directly should be strict.
-_LOOSE = {
-    # look-ups
-    "upgrade_status", "list_themes", "get_time", "convert_time", "tasks_for_day", "list_tasks",
-    "find_task", "list_people", "list_file_devices", "list_directory", "read_file",
-    "search_files", "vault_projects", "vault_read",
-    # only propose an approval card, or check their own input
-    "undo_last_upgrade", "write_file", "edit_file", "create_folder", "move_file", "set_theme",
-}
+# Strict mode guarantees a tool's input matches its schema, but the API compiles all strict
+# schemas in a request together and refuses when they're too big: at most 20 strict tools, 24
+# optional settings, and (measured 2026-10-29) about ten of these tools' size. So only the few
+# tools where a malformed input would do the most harm are strict, well under that, and every
+# other tool is loose: its handler copes with a missing or odd value, or it only proposes an
+# approval card. A new tool is loose unless it's added here; selfupgrade.py blocks an upgrade
+# whose strict tools would be refused.
+_STRICT = {"request_self_upgrade", "add_task", "update_task", "delete_task", "vault_update_task"}
 for _tool in TOOLS:
-    if _tool["name"] in _LOOSE:
-        _tool["strict"] = False
+    _tool["strict"] = _tool["name"] in _STRICT
 
 
 class ToolBox:

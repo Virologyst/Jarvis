@@ -320,11 +320,23 @@ def test_tool_schema_limits() -> None:
     assert tool_schema_problems(twenty + [dict(_tool("t20", 0), strict=False)]) == []
 
 
+def test_strict_schemas_that_are_too_big_together() -> None:
+    from jarvis_brain.selfupgrade import MAX_STRICT_PROPERTIES
+    many = [{"name": f"t{i}", "strict": True, "input_schema": {
+        "type": "object", "properties": {f"p{j}": {"type": "string"} for j in range(5)},
+        "required": [f"p{j}" for j in range(5)]}} for i in range(7)]          # 35 settings
+    problems = tool_schema_problems(many)
+    assert problems and "35 settings" in problems[0] and "too complex" in problems[0]
+    assert tool_schema_problems(many[:MAX_STRICT_PROPERTIES // 5]) == []
+
+
 def test_jarvis_leaves_room_for_new_strict_tools() -> None:
-    from jarvis_brain.selfupgrade import MAX_STRICT_TOOLS
+    from jarvis_brain.selfupgrade import MAX_STRICT_PROPERTIES, MAX_STRICT_TOOLS
     from jarvis_brain.tools import TOOLS
-    strict = [t["name"] for t in TOOLS if t.get("strict")]
-    assert len(strict) <= MAX_STRICT_TOOLS - 4, strict
+    strict = [t for t in TOOLS if t.get("strict")]
+    settings = sum(len(t["input_schema"]["properties"]) for t in strict)
+    assert len(strict) <= MAX_STRICT_TOOLS - 4, [t["name"] for t in strict]
+    assert settings <= MAX_STRICT_PROPERTIES - 8, settings
 
 
 def test_jarvis_own_tools_fit_the_api_limits() -> None:
