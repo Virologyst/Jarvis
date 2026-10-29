@@ -50,7 +50,11 @@ def main() -> None:
     def device(value):
         return int(value) if value is not None and value.isdigit() else value
 
+    from .audio import DeviceChoice
     from .client import Terminal
+    # The mic and speaker picked on the screen, remembered here; --mic/--speaker win for this run
+    devices = DeviceChoice(REPO_ROOT / "data" / "audio-devices.json",
+                           device(args.mic), device(args.speaker))
     eye = None
     if not args.no_eye:
         from .eye import Eye
@@ -58,8 +62,7 @@ def main() -> None:
     terminal = Terminal(
         brain_url=args.brain, terminal_id=args.id, ui_port=args.ui_port,
         wake_threshold=args.wake_threshold, use_wake=not args.no_wake,
-        mic_device=device(args.mic), speaker_device=device(args.speaker),
-        eye=eye,
+        eye=eye, devices=devices,
     )
     keyboard = not args.no_keyboard and sys.stdin is not None and sys.stdin.isatty()
     if keyboard:

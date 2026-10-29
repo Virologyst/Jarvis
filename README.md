@@ -39,8 +39,10 @@ powershell -ExecutionPolicy Bypass -File scripts\setup-dev.ps1
 ```
 
 Open http://localhost:8080. Say "hey Jarvis", tap the button, or press Enter in the
-terminal window. Useful flags: `--no-wake` (button only), `--list-devices`,
-`--mic <n>` / `--speaker <n>`, `-v` for debug logs.
+terminal window. Pick the microphone and speaker with the 🎧 button at the top right: it
+switches straight away and is remembered (`data/audio-devices.json`); a chosen device that's
+unplugged falls back to the system default until it's back. Useful flags: `--no-wake` (button
+only), `--list-devices`, `--mic <name>` / `--speaker <name>` (for this run), `-v` for debug logs.
 
 ## Set up the brain PC (starts at boot, no login needed)
 

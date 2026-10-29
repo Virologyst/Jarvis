@@ -31,7 +31,10 @@ from jarvis_protocol import (
     SetTheme, State, UserInput, WakeCheck, WakeResult, decode, encode,
 )
 
-from .audio import Microphone, Player, refresh_devices, rms
+from .audio import (
+    DeviceChoice, Microphone, Player, chime, device_name, find_device, list_devices,
+    refresh_devices, rms,
+)
 from .wake import MAYBE, WAKE, WakeWord
 
 log = logging.getLogger(__name__)
@@ -89,7 +92,7 @@ def _load_vad():
 class Terminal:
     def __init__(self, brain_url: str, terminal_id: str, ui_port: int,
                  wake_threshold: float, use_wake: bool, mic_device=None, speaker_device=None,
-                 eye=None):
+                 eye=None, devices: DeviceChoice | None = None):
         self.eye = eye  # jarvis_terminal.eye.Eye, or None
         self.brain_url = brain_url
         self.terminal_id = terminal_id
@@ -98,13 +101,19 @@ class Terminal:
         self.preroll: collections.deque[bytes] = collections.deque(maxlen=int(PREROLL_S / FRAME_S))
         self.theme: str | None = None   # set by the brain (SetTheme)
         self._wake_check: tuple[str, float] | None = None   # (check_id, sent at)
-        self.mic_device, self.speaker_device = mic_device, speaker_device
+        # The chosen mic and speaker (by name, "" = system default); the picker on the page
+        # changes them. What's actually open is looked up from these at every (re)open.
+        self.devices = devices or DeviceChoice(None, mic_device, speaker_device)
+        self._reopen_audio = asyncio.Event()   # set to make the mic loop reopen both devices
+        self.mic_open = ""          # the mic actually in use, for the picker
+        self.mic_level = 0.0        # loudness of the last mic frame, 0..1
+        self.meter = False          # the picker is showing, so send mic levels to the page
 
         self.state = "idle"
         self.brain_state = "idle"
         self.brain_ws: aiohttp.ClientWebSocketResponse | None = None
         self.ui_sockets: set[web.WebSocketResponse] = set()
-        self.player = Player(speaker_device)
+        self.player = Player(self._speaker_device())
         self.vad = _load_vad()
         self.noise_floor = 100.0
         self._listen = {"started": 0.0, "speech": False, "last_voice": 0.0,
@@ -193,26 +202,50 @@ class Terminal:
 
     # ---- loops ---------------------------------------------------------
 
+    def _speaker_device(self):
+        return find_device(self.devices.speaker, "output")
+
+    def _try_mic(self, device) -> Microphone:
+        mic = Microphone(asyncio.get_running_loop(), device)
+        mic.start()
+        return mic
+
     async def _open_mic(self) -> Microphone:
-        """Open the mic, retrying until one is plugged in (the screen and eye work without one)."""
+        """Open the chosen mic (or the default if it isn't plugged in), retrying until there's one
+        (the screen and eye work without one)."""
         warned = False
         while True:
-            try:
-                mic = Microphone(asyncio.get_running_loop(), self.mic_device)
-                mic.start()
-                return mic
-            except Exception as e:  # PortAudioError, ValueError (no such device)
-                if not warned:
-                    log.warning("no microphone (%s); tap-to-talk and wake word are off until one "
-                                "is plugged in. Checking every 10 s.", e)
-                    warned = True
-                await asyncio.sleep(10)
-                refresh_devices()
+            self._reopen_audio.clear()
+            chosen = self.devices.mic
+            device = find_device(chosen, "input")
+            if chosen not in ("", None) and device is None and not warned:
+                log.warning("microphone %r isn't plugged in; using the default", chosen)
+            for attempt in dict.fromkeys([device, None]):   # the chosen one, then the default
+                try:
+                    mic = self._try_mic(attempt)
+                    self.mic_open = device_name(attempt, "input")
+                    return mic
+                except Exception as e:  # PortAudioError, ValueError (no such device)
+                    last = e
+            if not warned:
+                log.warning("no microphone (%s); tap-to-talk and wake word are off until one "
+                            "is plugged in. Checking every 10 s.", last)
+                warned = True
+            self.mic_open = ""
+            await self.send_devices()
+            try:   # a new choice on the screen tries again straight away
+                await asyncio.wait_for(self._reopen_audio.wait(), 10)
+            except asyncio.TimeoutError:
+                pass
+            refresh_devices()
 
     async def mic_loop(self) -> None:
         while True:
             mic = await self._open_mic()
-            log.info("microphone open")
+            self.player.device = self._speaker_device()
+            log.info("microphone open: %s; speaker: %s", self.mic_open,
+                     device_name(self.player.device, "output"))
+            await self.send_devices()
             silent_s = 0.0
             try:
                 while True:
@@ -222,6 +255,9 @@ class Terminal:
                         # An unplugged mic just stops delivering audio, without an error.
                         # Reopen, picking up whatever mic is the default now.
                         log.warning("microphone stopped sending audio (unplugged?); reopening")
+                        break
+                    if self._reopen_audio.is_set():
+                        log.info("switching audio devices")
                         break
                     silent_s = silent_s + FRAME_S if not any(frame) else 0.0
                     if silent_s >= MIC_DEAD_S and self.state == "idle" and not self.player.busy:
@@ -238,6 +274,36 @@ class Terminal:
             refresh_devices()
             if self.state == "listening":
                 await self.stop_listening(cancel=True)
+
+    # ---- choosing the mic and speaker (the picker on the page) ----------
+
+    async def send_devices(self) -> None:
+        """Tell the page which devices there are, which are chosen and which are in use."""
+        if not self.ui_sockets:
+            return
+        try:
+            found = list_devices()
+        except Exception as e:
+            log.warning("couldn't list audio devices: %s", e)
+            found = {"inputs": [], "outputs": []}
+        await self.to_ui({
+            "type": "audio_devices", **found,
+            "mic": self.devices.mic if isinstance(self.devices.mic, str) else "",
+            "speaker": self.devices.speaker if isinstance(self.devices.speaker, str) else "",
+            "mic_open": self.mic_open or "none",
+            "speaker_open": device_name(self.player.device, "output"),
+        })
+
+    async def choose_devices(self, mic: str | None, speaker: str | None) -> None:
+        self.devices.set(mic, speaker)
+        log.info("audio devices chosen: mic %r, speaker %r", self.devices.mic, self.devices.speaker)
+        self._reopen_audio.set()   # the mic loop reopens both (and re-scans) between frames
+
+    def test_speaker(self) -> None:
+        if self.player.busy or self.state != "idle":
+            return   # don't talk over Jarvis
+        self.player.begin(24000)
+        self.player.feed(chime(24000))
 
     def _is_voice(self, frame: bytes, level: float) -> bool:
         if self.vad:
@@ -277,6 +343,7 @@ class Terminal:
 
     async def _on_frame(self, frame: bytes) -> None:
         level = rms(frame)
+        self.mic_level = min(1.0, level / 3000.0)
         if self.state == "idle":
             self.noise_floor = 0.95 * self.noise_floor + 0.05 * level
             self.preroll.append(frame)
@@ -395,6 +462,7 @@ class Terminal:
         if self.theme:
             await ws.send_str(json.dumps({"type": "set_theme", "theme": self.theme}))
         await ws.send_str(json.dumps({"type": "listen_mode", "on": self.always_listening}))
+        await self.send_devices()
         try:
             async for msg in ws:
                 if msg.type != WSMsgType.TEXT:
@@ -419,6 +487,16 @@ class Terminal:
                 elif action.get("action") == "listen_mode":
                     # The toggle: the brain switches it, says so, and tells us (ListenMode)
                     await self.to_brain(ListenMode(bool(action.get("on", not self.always_listening))))
+                elif action.get("action") == "audio_rescan":
+                    self._reopen_audio.set()   # re-scan for newly plugged-in devices
+                elif action.get("action") == "set_audio":
+                    mic, speaker = action.get("mic"), action.get("speaker")
+                    await self.choose_devices(None if mic is None else str(mic),
+                                              None if speaker is None else str(speaker))
+                elif action.get("action") == "test_speaker":
+                    self.test_speaker()
+                elif action.get("action") == "meter":
+                    self.meter = bool(action.get("on"))
         finally:
             self.ui_sockets.discard(ws)
         return ws
@@ -451,6 +529,8 @@ class Terminal:
             if self.ui_sockets and (busy or was_busy):
                 await self.to_ui({"type": "voice_level", "level": round(self.player.level if busy else 0, 3)})
             was_busy = busy
+            if self.meter and self.ui_sockets:   # the device picker's mic level bar
+                await self.to_ui({"type": "mic_level", "level": round(self.mic_level, 3)})
             await asyncio.sleep(1 / EYE_HZ)
 
     async def keyboard_loop(self) -> None:
