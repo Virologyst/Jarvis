@@ -313,6 +313,18 @@ def test_tool_schema_limits() -> None:
     assert tool_schema_problems([_tool("a", 0), _tool("a", 0)])     # duplicate names
     loose = dict(_tool("c", 30), strict=False)                       # only strict tools count
     assert tool_schema_problems([loose]) == []
+    twenty = [_tool(f"t{i}", 0) for i in range(20)]
+    assert tool_schema_problems(twenty) == []
+    too_many = tool_schema_problems(twenty + [_tool("t20", 0)])      # 25 broke Jarvis
+    assert too_many and "21 tools are marked strict" in too_many[0]
+    assert tool_schema_problems(twenty + [dict(_tool("t20", 0), strict=False)]) == []
+
+
+def test_jarvis_leaves_room_for_new_strict_tools() -> None:
+    from jarvis_brain.selfupgrade import MAX_STRICT_TOOLS
+    from jarvis_brain.tools import TOOLS
+    strict = [t["name"] for t in TOOLS if t.get("strict")]
+    assert len(strict) <= MAX_STRICT_TOOLS - 4, strict
 
 
 def test_jarvis_own_tools_fit_the_api_limits() -> None:

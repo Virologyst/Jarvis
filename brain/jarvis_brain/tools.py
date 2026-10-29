@@ -347,6 +347,17 @@ TOOLS += [
 _VAULT_TOOLS = {"vault_projects", "vault_read", "vault_add_task", "vault_update_task",
                 "vault_update_project", "vault_new_project", "vault_add_point"}
 
+# The API allows at most 20 strict tools per request (and 24 optional settings across them).
+# Strict guarantees the input matches the schema, which matters for tools that change things.
+# Tools that only look something up don't need it (their handlers cope with a missing or odd
+# value), so they're left loose, keeping room for new tools under the limit.
+_LOOKUPS = {"upgrade_status", "undo_last_upgrade", "list_themes", "get_time", "convert_time",
+            "tasks_for_day", "list_tasks", "find_task", "list_people", "vault_projects",
+            "vault_read"}
+for _tool in TOOLS:
+    if _tool["name"] in _LOOKUPS:
+        _tool["strict"] = False
+
 
 class ToolBox:
     """Runs tool calls for one terminal's conversation; shows any cards on that terminal."""

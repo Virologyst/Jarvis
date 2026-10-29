@@ -123,6 +123,7 @@ def protected_changes(paths: list[str]) -> list[str]:
 # total (400 "Schemas contains too many optional parameters"). Every conversation would fail,
 # while /health still looks fine, so an upgrade that crosses it is blocked, not offered.
 MAX_STRICT_OPTIONAL = 24
+MAX_STRICT_TOOLS = 20      # and at most this many tools marked strict
 # Prints the upgraded brain's tool list as JSON, run inside the upgrade's worktree
 DUMP_TOOLS = "import json, jarvis_brain.tools as t; print(json.dumps(t.TOOLS))"
 
@@ -130,13 +131,17 @@ DUMP_TOOLS = "import json, jarvis_brain.tools as t; print(json.dumps(t.TOOLS))"
 def tool_schema_problems(tools: list[dict]) -> list[str]:
     """Reasons the API would reject these tool definitions outright (empty list = fine)."""
     problems = []
-    optional = 0
+    optional = strict = 0
     for tool in tools:
         if not tool.get("strict"):
             continue
+        strict += 1
         schema = tool.get("input_schema") or {}
         required = set(schema.get("required") or [])
         optional += sum(1 for p in (schema.get("properties") or {}) if p not in required)
+    if strict > MAX_STRICT_TOOLS:
+        problems.append(f"{strict} tools are marked strict and the API allows "
+                        f"{MAX_STRICT_TOOLS}, so every conversation would fail")
     if optional > MAX_STRICT_OPTIONAL:
         problems.append(f"the tools have {optional} optional settings and the API allows "
                         f"{MAX_STRICT_OPTIONAL}, so every conversation would fail")
