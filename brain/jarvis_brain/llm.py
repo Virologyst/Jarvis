@@ -36,6 +36,19 @@ class Conversation:
         self.messages: list[dict] = []
         self.last_turn = 0.0
 
+    def add_aside(self, context: str, said: str) -> None:
+        """Record something Jarvis said unprompted (a task reminder), so an answer to it
+        ("snooze it", "mark it done") makes sense: `context` goes in as a user message saying
+        what happened, then `said` as Jarvis's reply. Counts as a turn for the idle reset."""
+        now = time.monotonic()
+        if self.messages and now - self.last_turn > self.idle_reset_s:
+            self.messages = []
+        if self.messages and self.messages[-1]["role"] != "assistant":
+            return   # a turn is half-way through; never break the history's order
+        self.messages += [{"role": "user", "content": context},
+                          {"role": "assistant", "content": said}]
+        self.last_turn = now
+
     async def reply(self, user_text: str | list[dict]) -> AsyncIterator[str]:
         """Yield the reply as text pieces, running any tools Claude calls along the way.
 
@@ -53,8 +66,9 @@ class Conversation:
         turn_start = len(self.messages)
         self.messages.append({"role": "user", "content": user_text})
         try:
-            for _ in range(MAX_TOOL_ROUNDS):
+            for round_no in range(1, MAX_TOOL_ROUNDS + 1):
                 extra = {"tools": self.tools} if self.tools else {}
+                started, first_text = time.monotonic(), None
                 async with self.client.beta.messages.stream(
                     model=self.model,
                     max_tokens=16000,
@@ -69,8 +83,13 @@ class Conversation:
                     **extra,
                 ) as stream:
                     async for text in stream.text_stream:
+                        if first_text is None:
+                            first_text = time.monotonic() - started
                         yield text
                     final = await stream.get_final_message()
+                log.info("[timing] Claude round %d: %.2fs (first text %s, stop: %s)", round_no,
+                         time.monotonic() - started,
+                         "none" if first_text is None else f"{first_text:.2f}s", final.stop_reason)
 
                 if final.stop_reason == "refusal":
                     log.warning("refusal: %s", getattr(final, "stop_details", None))

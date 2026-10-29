@@ -10,7 +10,7 @@ import types
 import numpy as np
 import pytest
 
-from jarvis_protocol import ListenMode, decode, encode
+from jarvis_protocol import AudioStart, ListenMode, ListenStart, State, decode, encode
 
 pytest.importorskip("aiohttp")
 try:
@@ -128,7 +128,24 @@ def test_brain_switches_it_and_the_page_hears(monkeypatch) -> None:
     assert not t.always_listening
 
 
+def test_unprompted_reminder_is_followed_by_an_open_mic(monkeypatch) -> None:
+    t = make_terminal(monkeypatch)
+    asyncio.run(t._from_brain(encode(AudioStart(16000))))       # an ordinary announcement
+    assert t.state == "idle"
+    asyncio.run(t._from_brain(encode(State("speaking"))))
+    asyncio.run(t._from_brain(encode(AudioStart(16000, follow_up=True))))   # a reminder
+    assert t.state == "waiting"                     # its own voice isn't heard as a wake
+    run(t, [LOUD])
+    assert t.state == "waiting" and not t.brain_ws.sent
+    asyncio.run(t._from_brain(encode(State("idle"))))
+    run(t, [HUSH])                                  # finished playing: listen for an answer
+    assert t.state == "listening"
+    assert isinstance(t.brain_ws.sent[-1], ListenStart)
+    assert t.brain_ws.sent[-1].reason == "follow_up"
+
+
 def test_protocol_round_trip() -> None:
+    assert decode(encode(AudioStart(22050))).follow_up is False   # old brains: no follow-up
     msg = decode(encode(ListenMode(True, quiet=True)))
     assert isinstance(msg, ListenMode) and msg.on and msg.quiet
     assert json.loads(encode(ListenMode(False)))["type"] == "listen_mode"

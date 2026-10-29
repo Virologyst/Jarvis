@@ -33,6 +33,10 @@ def main() -> None:
     p.add_argument("--eye-config", type=Path,
                    default=Path(os.environ.get("JARVIS_EYE_CONFIG", REPO_ROOT / "data" / "eye-nodes.json")),
                    help="where node positions are saved")
+    p.add_argument("--no-files", action="store_true",
+                   default=os.environ.get("JARVIS_TERMINAL_FILES", "1").strip().lower()
+                   in ("0", "false", "no", "off"),
+                   help="don't let Jarvis read this machine's files (read-only, C: drive)")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args()
 
@@ -55,6 +59,11 @@ def main() -> None:
     # The mic and speaker picked on the screen, remembered here; --mic/--speaker win for this run
     devices = DeviceChoice(REPO_ROOT / "data" / "audio-devices.json",
                            device(args.mic), device(args.speaker))
+    from .files import TerminalFiles
+    files = None if args.no_files else TerminalFiles()
+    if files and files.available:
+        logging.getLogger(__name__).info("Jarvis can read this machine's files (read-only); "
+                                         "--no-files turns that off")
     eye = None
     if not args.no_eye:
         from .eye import Eye
@@ -62,7 +71,7 @@ def main() -> None:
     terminal = Terminal(
         brain_url=args.brain, terminal_id=args.id, ui_port=args.ui_port,
         wake_threshold=args.wake_threshold, use_wake=not args.no_wake,
-        eye=eye, devices=devices,
+        eye=eye, devices=devices, files=files,
     )
     keyboard = not args.no_keyboard and sys.stdin is not None and sys.stdin.isatty()
     if keyboard:

@@ -43,6 +43,9 @@ class Transcriber:
                 model = WhisperModel(model_name, device=dev, compute_type=compute)
                 # A tiny warm-up surfaces missing CUDA libraries now, not mid-sentence.
                 list(model.transcribe(np.zeros(16_000, dtype=np.float32), language="en")[0])
+                # ...and load its voice filter, used for every real turn, so the first doesn't wait
+                list(model.transcribe(np.zeros(16_000, dtype=np.float32), language="en",
+                                      vad_filter=True)[0])
             except Exception as e:  # noqa: BLE001 - any failure means try the next device
                 log.warning("speech-to-text on %s failed: %s", dev, e)
                 last_error = e

@@ -14,7 +14,8 @@ __all__ = [
     "Hello", "Welcome", "ListenStart", "ListenEnd", "ListenCancel",
     "State", "Transcript", "ReplyText", "AudioStart", "AudioEnd",
     "Card", "Decision", "Error", "WakeCheck", "WakeResult",
-    "UserInput", "SetTheme", "ListenMode", "Emote", "CardDone", "encode", "decode",
+    "UserInput", "SetTheme", "ListenMode", "Emote", "CardDone", "FileRequest", "FileReply",
+    "encode", "decode",
 ]
 
 _REGISTRY: dict[str, type] = {}
@@ -33,8 +34,10 @@ def _message(type_name: str):
 @_message("hello")
 @dataclass
 class Hello:
+    """files: this terminal lets the brain read its drive (FileRequest), read-only."""
     terminal_id: str
     protocol: int = 1
+    files: bool = False
 
 
 @_message("listen_start")
@@ -108,6 +111,15 @@ class Decision:
     decision: str
 
 
+@_message("file_reply")
+@dataclass
+class FileReply:
+    """The answer to a FileRequest: the text to give Claude, or (ok=False) why not."""
+    request_id: str
+    ok: bool
+    text: str = ""
+
+
 # --- brain -> terminal ---------------------------------------------------
 
 @_message("welcome")
@@ -141,8 +153,12 @@ class ReplyText:
 @_message("audio_start")
 @dataclass
 class AudioStart:
-    """Speech audio follows as binary frames at this sample rate."""
+    """Speech audio follows as binary frames at this sample rate.
+
+    follow_up: said unprompted (a reminder) but expecting an answer, so an idle terminal keeps
+    the mic open for a few seconds afterwards, as it does after a reply."""
     sample_rate: int
+    follow_up: bool = False
 
 
 @_message("audio_end")
@@ -182,6 +198,17 @@ class Emote:
 class CardDone:
     """A card was approved or rejected (on any screen, or by voice): take it down everywhere."""
     card_id: str
+
+
+@_message("file_request")
+@dataclass
+class FileRequest:
+    """Read something on the terminal's own drive, for a file tool (only sent to a terminal
+    whose Hello said files=True). op: 'list_directory' | 'read_file' | 'search_files'; args as
+    for those tools. The terminal applies its own checks and answers with a FileReply."""
+    request_id: str
+    op: str
+    args: dict[str, Any] = field(default_factory=dict)
 
 
 @_message("wake_result")

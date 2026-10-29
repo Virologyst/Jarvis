@@ -8,6 +8,9 @@ Local states:
 Permanent listening (switched by voice through the brain, or the toggle on the screen): while
 idle, any clear voice starts listening instead of "hey Jarvis". It still needs a run of voiced
 frames, and never triggers while Jarvis is speaking or just after, so it doesn't hear itself.
+
+On Windows the terminal also lets the brain read its drive (FileRequest -> FileReply, read-only,
+with its own privacy checks; see files.py), so Jarvis can read notes kept on this machine.
 """
 
 from __future__ import annotations
@@ -27,8 +30,9 @@ import numpy as np
 from aiohttp import WSMsgType, web
 
 from jarvis_protocol import (
-    AudioEnd, AudioStart, Decision, Emote, Hello, ListenCancel, ListenEnd, ListenMode, ListenStart,
-    SetTheme, State, UserInput, WakeCheck, WakeResult, decode, encode,
+    AudioEnd, AudioStart, Decision, Emote, FileReply, FileRequest, Hello, ListenCancel, ListenEnd,
+    ListenMode, ListenStart, ReplyText, SetTheme, State, Transcript, UserInput, WakeCheck,
+    WakeResult, decode, encode,
 )
 
 from .audio import (
@@ -47,6 +51,12 @@ FRAME_S = 0.08
 SILENCE_TO_END_S = float(os.environ.get("JARVIS_END_SILENCE_S", "1.3"))
 # Silero voice detector score (0..1) that counts as speech
 VAD_THRESHOLD = float(os.environ.get("JARVIS_VAD_THRESHOLD", "0.5"))
+# Silero's window at 16 kHz is 512 samples (32 ms): each 80 ms frame is split into those, and
+# what's left over is carried into the next frame
+VAD_WINDOW = 512
+# While listening, a frame no louder than this times the room's quiet level isn't speech, even if
+# the voice detector thinks so (a fan or hum it mistakes for voice must not hold the mic open)
+QUIET_FACTOR = float(os.environ.get("JARVIS_QUIET_FACTOR", "1.5"))
 # Give up if nothing is said this long after "hey Jarvis" or a tap
 NO_SPEECH_CANCEL_S = float(os.environ.get("JARVIS_LISTEN_TIMEOUT_S", "10"))
 MAX_LISTEN_S = 25.0
@@ -75,6 +85,7 @@ ONSET_FRAMES = int(os.environ.get("JARVIS_ONSET_FRAMES", "3"))
 ONSET_PREROLL_S = 1.0
 # ...and nothing opens it while Jarvis is speaking or for this long after (its own voice)
 ECHO_GUARD_S = float(os.environ.get("JARVIS_ECHO_GUARD_S", "0.8"))
+MIC_LAG_WARN_FRAMES = 6    # mic frames waiting to be handled (0.48 s): we've fallen behind live audio
 
 
 def _load_vad():
@@ -92,8 +103,9 @@ def _load_vad():
 class Terminal:
     def __init__(self, brain_url: str, terminal_id: str, ui_port: int,
                  wake_threshold: float, use_wake: bool, mic_device=None, speaker_device=None,
-                 eye=None, devices: DeviceChoice | None = None):
+                 eye=None, devices: DeviceChoice | None = None, files=None):
         self.eye = eye  # jarvis_terminal.eye.Eye, or None
+        self.files = files  # jarvis_terminal.files.TerminalFiles (read-only), or None
         self.brain_url = brain_url
         self.terminal_id = terminal_id
         self.ui_port = ui_port
@@ -116,6 +128,15 @@ class Terminal:
         self.player = Player(self._speaker_device())
         self.vad = _load_vad()
         self.noise_floor = 100.0
+        # Mic levels while idle, for the room's quiet level (see QUIET_FACTOR)
+        self.idle_levels: collections.deque[float] = collections.deque(maxlen=int(PREROLL_S / FRAME_S))
+        self.quiet_level = 0.0
+        self._vad_carry = np.zeros(0, dtype=np.int16)
+        self._vad_score = 0.0
+        # Timing of the current turn, for the log: when listening ended, which stages are logged
+        self._turn_t0 = 0.0
+        self._turn_seen: set[str] = set()
+        self._lag_warned = 0.0
         self._listen = {"started": 0.0, "speech": False, "last_voice": 0.0,
                         "no_speech_s": NO_SPEECH_CANCEL_S}
         self._replied = False
@@ -154,6 +175,9 @@ class Terminal:
             return
         now = time.monotonic()
         self._listen = {"started": now, "speech": False, "last_voice": now, "no_speech_s": no_speech_s}
+        if len(self.idle_levels) >= 10:
+            # The quieter moments just before (gaps between words): the room's own level
+            self.quiet_level = float(np.percentile(self.idle_levels, 20))
         if with_preroll and self.preroll:
             # Send the wake phrase too. It counts as speech, so a bare "Good morning Jarvis"
             # ends after the usual pause and gets a reply instead of waiting for more.
@@ -162,10 +186,9 @@ class Terminal:
             self._listen["speech"] = True
         self.preroll.clear()
         self._replied = False
-        if self.vad:
-            self.vad.reset_states()
+        self._reset_vad()
         await self.set_state("listening")
-        log.info("listening (%s)", reason)
+        log.info("listening (%s); room quiet level %.0f", reason, self.quiet_level)
 
     async def send_wake_check(self) -> None:
         """The wake model half-heard "...Jarvis": ask the brain whether a wake phrase was said."""
@@ -187,7 +210,27 @@ class Terminal:
         if msg.ok and fresh and self.state == "idle":
             await self.start_listening("wake_phrase", with_preroll=True)
 
-    async def stop_listening(self, cancel: bool = False) -> None:
+    @property
+    def shares_files(self) -> bool:
+        return bool(self.files and self.files.available)
+
+    async def on_file_request(self, msg: FileRequest) -> None:
+        """The brain wants to read something on this machine: answer it (read-only), off the
+        event loop so audio keeps flowing during a long search."""
+        if self.shares_files:
+            ok, text = await asyncio.to_thread(self.files.handle, msg.op, msg.args)
+        else:
+            ok, text = False, "This terminal isn't sharing its files."
+        ws = self.brain_ws
+        if ws is not None and not ws.closed:
+            await ws.send_str(encode(FileReply(msg.request_id, ok, text)))
+
+    async def stop_listening(self, cancel: bool = False, why: str = "") -> None:
+        now = time.monotonic()
+        log.info("[timing] %s after %.2fs listening (%s; last voice %.2fs before)",
+                 "cancelled" if cancel else "end of speech", now - self._listen["started"],
+                 why or "button", now - self._listen["last_voice"])
+        self._turn_t0, self._turn_seen = (0.0 if cancel else now), set()
         await self.to_brain(ListenCancel() if cancel else ListenEnd())
         await self.set_state("idle" if cancel else "waiting")
         if self.wake:
@@ -264,6 +307,7 @@ class Terminal:
                         log.info("microphone has sent only zeros for %.0f s (device changed?); "
                                  "reopening the default mic and speaker", silent_s)
                         break
+                    self._check_lag(mic.queue.qsize())
                     await self._on_frame(frame)
             finally:
                 try:
@@ -273,7 +317,21 @@ class Terminal:
             self.player.close()   # re-scanning devices invalidates open streams; it reopens on demand
             refresh_devices()
             if self.state == "listening":
-                await self.stop_listening(cancel=True)
+                await self.stop_listening(cancel=True, why="microphone lost")
+
+    def _check_lag(self, waiting: int) -> None:
+        """Warn (at most every 10 s) if mic frames pile up: everything would be heard late."""
+        now = time.monotonic()
+        if waiting >= MIC_LAG_WARN_FRAMES and now - self._lag_warned > 10:
+            self._lag_warned = now
+            log.warning("[timing] microphone audio is %.1fs behind (this machine is too slow "
+                        "for the wake word / voice detector)", waiting * FRAME_S)
+
+    def _reset_vad(self) -> None:
+        if self.vad:
+            self.vad.reset_states()
+        self._vad_carry = np.zeros(0, dtype=np.int16)
+        self._vad_score = 0.0
 
     # ---- choosing the mic and speaker (the picker on the page) ----------
 
@@ -309,8 +367,12 @@ class Terminal:
         if self.vad:
             # A voice detector copes with quiet syllables and mid-sentence pauses far better
             # than mic volume, and ignores fans and keyboard clatter
-            pcm = np.frombuffer(frame, dtype=np.int16)
-            return float(self.vad.predict(pcm, frame_size=640)) >= VAD_THRESHOLD
+            pcm = np.concatenate([self._vad_carry, np.frombuffer(frame, dtype=np.int16)])
+            usable = len(pcm) // VAD_WINDOW * VAD_WINDOW
+            if usable:
+                self._vad_score = float(self.vad.predict(pcm[:usable], frame_size=VAD_WINDOW))
+            self._vad_carry = pcm[usable:]
+            return self._vad_score >= VAD_THRESHOLD
         return level >= max(MIN_SPEECH_RMS, self.noise_floor * 3)
 
     def _voice_onset(self, frame: bytes, level: float) -> bool:
@@ -337,8 +399,7 @@ class Terminal:
         self._quiet_until = time.monotonic() + ECHO_GUARD_S
         if self.wake:
             self.wake.reset()
-        if self.vad:
-            self.vad.reset_states()
+        self._reset_vad()
         log.info("permanent listening %s", "on" if on else "off")
 
     async def _on_frame(self, frame: bytes) -> None:
@@ -347,6 +408,7 @@ class Terminal:
         if self.state == "idle":
             self.noise_floor = 0.95 * self.noise_floor + 0.05 * level
             self.preroll.append(frame)
+            self.idle_levels.append(level)
             if self.always_listening:
                 if self.brain_ws and self._voice_onset(frame, level):
                     self._onset = 0
@@ -355,6 +417,7 @@ class Terminal:
             elif self.wake and self.brain_ws:
                 heard = self.wake.check(frame)
                 if heard == WAKE:
+                    log.info("[timing] wake word heard")
                     await self.start_listening("wake", with_preroll=True)
                 elif heard == MAYBE:
                     # The score rises partway through "Jarvis": wait for the end of the word
@@ -383,17 +446,35 @@ class Terminal:
             return
         await self.brain_ws.send_bytes(frame)
         now = time.monotonic()
-        if self._is_voice(frame, level):
+        voice = self._is_voice(frame, level)
+        if voice and self.vad and level <= self.quiet_level * QUIET_FACTOR:
+            voice = False   # no louder than the room was before: not someone talking to us
+        if voice:
             self._listen["speech"] = True
             self._listen["last_voice"] = now
         elapsed = now - self._listen["started"]
         if self._listen["speech"] and now - self._listen["last_voice"] > SILENCE_TO_END_S:
-            await self.stop_listening()
+            await self.stop_listening(why=f"{SILENCE_TO_END_S:.1f}s pause")
         elif not self._listen["speech"] and elapsed > self._listen["no_speech_s"]:
             log.info("nothing said, cancelling")
-            await self.stop_listening(cancel=True)
+            await self.stop_listening(cancel=True, why="nothing said")
         elif elapsed > MAX_LISTEN_S:
-            await self.stop_listening()
+            log.warning("[timing] still hearing voice after %.0fs, so stopping there. If nobody "
+                        "was talking, the voice detector is hearing the room: raise "
+                        "JARVIS_VAD_THRESHOLD or JARVIS_QUIET_FACTOR", MAX_LISTEN_S)
+            await self.stop_listening(why="time limit")
+
+    def _log_turn_timing(self, msg) -> None:
+        """Log how long after the end of speech each stage of the brain's answer arrived."""
+        if not self._turn_t0:
+            return
+        stage = {Transcript: "transcript", ReplyText: "first reply text",
+                 AudioStart: "first reply audio"}.get(type(msg))
+        if stage and stage not in self._turn_seen:
+            self._turn_seen.add(stage)
+            log.info("[timing] %s %.2fs after end of speech", stage, time.monotonic() - self._turn_t0)
+            if isinstance(msg, AudioStart):
+                self._turn_t0 = 0.0
 
     async def brain_loop(self) -> None:
         """Stay connected to the brain, reconnecting if it restarts."""
@@ -405,7 +486,8 @@ class Terminal:
                                                max_msg_size=4 * 1024 * 1024) as ws:
                         self.brain_ws = ws
                         delay = 1.0
-                        await ws.send_str(encode(Hello(self.terminal_id)))
+                        await ws.send_str(encode(Hello(self.terminal_id,
+                                                       files=self.shares_files)))
                         if self.always_listening:   # the brain restarted: carry on, quietly
                             await ws.send_str(encode(ListenMode(True, quiet=True)))
                         await self.to_ui({"type": "connection", "connected": True})
@@ -428,9 +510,13 @@ class Terminal:
 
     async def _from_brain(self, raw: str) -> None:
         msg = decode(raw)
+        self._log_turn_timing(msg)
         if isinstance(msg, WakeResult):
             await self.on_wake_result(msg)
             return  # nothing for the page to show
+        if isinstance(msg, FileRequest):
+            asyncio.create_task(self.on_file_request(msg))
+            return  # nor for this
         if isinstance(msg, Emote):
             # Show it when its sentence is actually heard, not when it arrives
             delay = self.player.buffered_seconds
@@ -440,6 +526,10 @@ class Terminal:
             return
         if isinstance(msg, AudioStart):
             self._replied = True  # Jarvis is answering, so a follow-up makes sense afterwards
+            if msg.follow_up and self.state == "idle":
+                # Said unprompted (a reminder): ignore the mic while it plays, then listen
+                # for an answer as after any reply
+                await self.set_state("waiting")
             self.player.begin(msg.sample_rate)
         elif isinstance(msg, AudioEnd):
             pass  # playback drains on its own
@@ -475,7 +565,7 @@ class Terminal:
                 elif action.get("action") == "say":
                     # Typed text / pictures: stop listening if we were, then send it on
                     if self.state == "listening":
-                        await self.stop_listening(cancel=True)
+                        await self.stop_listening(cancel=True, why="typed instead")
                     self.player.clear()
                     images = [{"media_type": str(i.get("media_type", "")), "data": str(i.get("data", ""))}
                               for i in action.get("images", [])][:5]

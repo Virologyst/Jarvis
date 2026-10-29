@@ -8,6 +8,9 @@ Each sentence starts with a mood tag ([amused] ...) that becomes an Emote messag
 audio; tags are stripped from everything shown or spoken. A short spoken "approve"/"reject" is
 handled here in code and never reaches Claude, and so is switching permanent listening on or
 off ("listen to me from now on" / "stop listening"); while it's on, noise and scraps are dropped.
+Task reminders (reminders.py) are said unprompted on every terminal once it's quiet, and the
+terminal then listens for an answer as it does after a reply.
+A terminal that shares its drive (Hello.files) answers the file tools' FileRequests for it.
 """
 
 from __future__ import annotations
@@ -17,22 +20,25 @@ import base64
 import contextlib
 import logging
 import os
+import time
 import uuid
 
 import anthropic
 from aiohttp import WSMsgType, web
 
 from jarvis_protocol import (
-    AudioEnd, AudioStart, Card, CardDone, Decision, Emote, Error, Hello, ListenCancel, ListenEnd,
-    ListenMode, ListenStart, ReplyText, SetTheme, State, Transcript, UserInput, WakeCheck, WakeResult,
-    Welcome, decode, encode,
+    AudioEnd, AudioStart, Card, CardDone, Decision, Emote, Error, FileReply, FileRequest, Hello,
+    ListenCancel, ListenEnd, ListenMode, ListenStart, ReplyText, SetTheme, State, Transcript,
+    UserInput, WakeCheck, WakeResult, Welcome, decode, encode,
 )
 
 from .approvals import ApprovalGate
 from .config import REPO_ROOT, Settings
 from .emotions import TagStripper, parse_sentence
+from .files import FileAccessError
 from .listenmode import addressed, is_noise, listen_mode_command
 from .llm import Conversation
+from .reminders import ReminderService
 from .selfupgrade import UpgradeManager, take_rollback_note
 from .sentences import SentenceSplitter
 from .stt import Transcriber
@@ -42,15 +48,21 @@ from .vault import Vault
 from .tools import TOOLS, ToolBox
 from .tts import make_speaker
 from .voicecommands import parse_voice_decision, pick_card
-from .wakecheck import heard_wake_phrase
+from .wakecheck import bare_wake_reply, heard_wake_phrase
 
 log = logging.getLogger(__name__)
 
 AUDIO_CHUNK_BYTES = 8192   # size of speech frames sent to terminals
 MAX_UTTERANCE_S = 30       # ignore audio beyond this per turn
+# A reminder waits this long after the last speech should have finished playing, so the
+# terminal can open its mic for a follow-up first (it's then busy listening, and waits more)
+REMINDER_GAP_S = 2.0
 MAX_IMAGES = 5             # pictures per typed message
 IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 WS_MAX_BYTES = 32 * 1024 * 1024
+SPEECH_CACHE_CHARS = 40    # short sentences ("Yes, Sir?") are synthesised once and kept
+FILE_REPLY_S = 20.0        # a terminal's answer to a file request (searches stop at 8 s)
+MAX_FILE_REPLY_CHARS = 40_000
 
 
 class Brain:
@@ -74,6 +86,8 @@ class Brain:
         self.tasks = TaskStore(REPO_ROOT / "data" / "tasks.json")   # shared by every terminal
         self.vault = Vault.from_env()   # Sir's Obsidian notes (JARVIS_VAULT), if set
         log.info("notes vault: %s", self.vault.root or "not set (JARVIS_VAULT)")
+        self.reminders = ReminderService(self.tasks, self.deliver_reminder)
+        self._reminder_loop: asyncio.Task | None = None
         # Said once to the first terminal that connects: (card title, what to say)
         rolled_back = take_rollback_note(REPO_ROOT)
         self.notice: tuple[str, str] | None = ("Upgrade rolled back", rolled_back) if rolled_back else None
@@ -83,12 +97,33 @@ class Brain:
         resumed = await self.upgrades.resume()
         if resumed and not self.notice:
             self.notice = ("Self-upgrade", resumed[0].upper() + resumed[1:])
+        self._reminder_loop = asyncio.create_task(self.reminders.run())
+
+    async def on_cleanup(self, app: web.Application) -> None:
+        if self._reminder_loop:
+            self._reminder_loop.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._reminder_loop
+
+    async def deliver_reminder(self, due) -> bool:
+        """Say a task reminder on every terminal, each as soon as it's free. False (try again
+        later) if no terminal is connected to hear it."""
+        if not self.sessions:
+            return False
+        for s in list(self.sessions):
+            s.queue_reminder(due)
+        return True
 
     async def decide(self, card_id: str, decision: str) -> str:
         """Approve/reject a card (from a tap or a spoken word) and take it down on every screen."""
         result = await self.approvals.decide(card_id, decision)
         await self.broadcast(CardDone(card_id))
         return result
+
+    def file_terminals(self) -> dict:
+        """Connected terminals that let Jarvis read their drives: name -> (op, args) -> text."""
+        return {s.terminal_id: s.remote_file for s in list(self.sessions)
+                if s.shares_files and not s.ws.closed}
 
     async def broadcast(self, msg) -> None:
         for s in list(self.sessions):
@@ -110,8 +145,13 @@ class TerminalSession:
         self.terminal_id = "unknown"
         self.theme = THEMES[DEFAULT_THEME]
         s = brain.settings
+        self.shares_files = False             # its Hello said the brain may read its drive
+        self._file_waits: dict[str, asyncio.Future] = {}   # FileRequests awaiting a FileReply
         tools = ToolBox(brain.upgrades, self.send, current_theme=lambda: self.theme.title,
-                        set_theme=self.set_theme, tasks=brain.tasks, vault=brain.vault)
+                        set_theme=self.set_theme, tasks=brain.tasks, approvals=brain.approvals,
+                        terminal_id=lambda: self.terminal_id,
+                        file_terminals=lambda: brain.file_terminals(),
+                        vault=getattr(brain, "vault", None))
         self.conversation = Conversation(brain.client, s.model, s.effort, s.idle_reset_minutes,
                                          tools=TOOLS, run_tool=tools.run)
         self.listening = False
@@ -119,6 +159,12 @@ class TerminalSession:
         self.always_listening = False   # permanent listening, per terminal; off at startup
         self.audio = bytearray()
         self.turn: asyncio.Task | None = None
+        self.reminders: list = []             # task reminders waiting for a quiet moment
+        self._reminding: asyncio.Task | None = None
+        self._asides = 0                      # unprompted speech under way
+        self.audio_until = 0.0                # when the speech sent so far ends (monotonic)
+        self.turn_t0 = 0.0                    # when this turn's speech ended, for timing logs
+        self._speech_cache: dict[tuple, bytes] = {}
 
     async def set_theme(self, name: str, announce: bool = True) -> str:
         theme = resolve(name)
@@ -148,16 +194,51 @@ class TerminalSession:
     def busy(self) -> bool:
         return self.listening or bool(self.turn and not self.turn.done())
 
-    async def speak_aside(self, text: str) -> None:
-        """Say something outside a turn (approval results, announcements), then go idle."""
-        await self._speak_text(text)
+    async def speak_aside(self, text: str, follow_up: bool = False) -> None:
+        """Say something outside a turn (approval results, announcements), then go idle.
+        follow_up: the terminal listens for an answer afterwards."""
+        self._asides += 1
+        try:
+            await self._speak_text(text, follow_up)
+        finally:
+            self._asides -= 1
         await self.send(State("idle"))
+
+    @property
+    def quiet(self) -> bool:
+        """Nothing being heard, thought about or said here, nor still playing."""
+        return (not self.busy and not self._asides
+                and time.monotonic() > self.audio_until + REMINDER_GAP_S)
+
+    def queue_reminder(self, due) -> None:
+        self.reminders.append(due)
+        if not self._reminding or self._reminding.done():
+            self._reminding = asyncio.create_task(self._say_reminders())
+
+    async def _say_reminders(self) -> None:
+        """Say queued reminders one at a time, never over Jarvis or the person talking."""
+        while self.reminders and not self.ws.closed:
+            if not self.quiet:
+                await asyncio.sleep(0.5)
+                continue
+            due = self.reminders.pop(0)
+            # So "snooze it" or "mark it done" afterwards makes sense to Claude
+            self.conversation.add_aside(due.note, due.text)
+            log.info("[%s] reminder: %s", self.terminal_id, due.text)
+            await self.speak_aside(due.text, follow_up=True)
 
     async def on_text(self, raw: str) -> None:
         msg = decode(raw)
+        if isinstance(msg, FileReply):
+            waiting = self._file_waits.get(msg.request_id)
+            if waiting and not waiting.done():
+                waiting.set_result((bool(msg.ok), str(msg.text)[:MAX_FILE_REPLY_CHARS]))
+            return
         if isinstance(msg, Hello):
             self.terminal_id = msg.terminal_id
-            log.info("terminal connected: %s", self.terminal_id)
+            self.shares_files = bool(msg.files)
+            log.info("terminal connected: %s%s", self.terminal_id,
+                     " (sharing its files, read-only)" if self.shares_files else "")
             await self.send(Welcome())
             self.theme = self.brain.themes.get(self.terminal_id)
             await self.send(SetTheme(self.theme.name))
@@ -176,7 +257,8 @@ class TerminalSession:
             if self.listening:
                 self.listening = False
                 pcm, self.audio = bytes(self.audio), bytearray()
-                self.turn = asyncio.create_task(self._run_turn(pcm))
+                self.turn_t0 = time.monotonic()
+                self.turn =asyncio.create_task(self._run_turn(pcm))
         elif isinstance(msg, ListenCancel):
             self.listening, self.audio = False, bytearray()
             await self.send(State("idle"))
@@ -188,6 +270,7 @@ class TerminalSession:
         elif isinstance(msg, UserInput):
             await self._cancel_turn()
             self.listening, self.audio = False, bytearray()
+            self.turn_t0 = time.monotonic()
             self.turn = asyncio.create_task(self._run_typed_turn(msg))
         elif isinstance(msg, SetTheme):
             with contextlib.suppress(ValueError):   # picked on the screen: switch, quietly
@@ -197,6 +280,30 @@ class TerminalSession:
             said = await self.set_listen_mode(msg.on)
             if not msg.quiet and not self.busy:
                 asyncio.create_task(self.speak_aside(said))
+
+    async def remote_file(self, op: str, args: dict) -> str:
+        """Ask this terminal to read something on its own drive (it checks the path itself).
+        Raises FileAccessError with what to say if it refuses or doesn't answer."""
+        request_id = uuid.uuid4().hex
+        waiting = asyncio.get_running_loop().create_future()
+        self._file_waits[request_id] = waiting
+        try:
+            await self.send(FileRequest(request_id, op, args))
+            ok, text = await asyncio.wait_for(waiting, FILE_REPLY_S)
+        except asyncio.TimeoutError:
+            raise FileAccessError(f"The terminal {self.terminal_id} didn't answer in time.") from None
+        finally:
+            self._file_waits.pop(request_id, None)
+        if not ok:
+            raise FileAccessError(text)
+        return text
+
+    def close_file_requests(self) -> None:
+        """The terminal went away: tell anything waiting on it."""
+        for waiting in self._file_waits.values():
+            if not waiting.done():
+                waiting.set_exception(FileAccessError(
+                    f"The terminal {self.terminal_id} disconnected before answering."))
 
     def on_audio(self, data: bytes) -> None:
         if self.listening and len(self.audio) < MAX_UTTERANCE_S * 16_000 * 2:
@@ -228,7 +335,8 @@ class TerminalSession:
         async def spoken():
             await self.send(State("thinking"))
             text = await asyncio.to_thread(self.brain.stt.transcribe, pcm)
-            log.info("[%s] heard: %r", self.terminal_id, text)
+            log.info("[%s] heard: %r (%.1fs of audio, speech-to-text %.2fs)", self.terminal_id,
+                     text, len(pcm) / 32_000, self._since_turn())
             if not text:
                 return
             if ambient and listen_mode_command(text) is None and is_noise(text):
@@ -236,6 +344,12 @@ class TerminalSession:
                 return
             await self.send(Transcript(text))
             if await self._voice_command(text, ambient):
+                return
+            if (ack := bare_wake_reply(text)) is not None:
+                # Just "Hey Jarvis": answer now, and let the terminal listen for the request.
+                # Recorded so Claude sees it was woken when the request comes.
+                self.conversation.add_aside(text, ack)
+                await self._speak_text(ack)
                 return
             await self._speak_stream(self.conversation.reply(text))
         await self._guarded(spoken())
@@ -312,23 +426,27 @@ class TerminalSession:
             if not self.ws.closed:
                 await self.send(State("idle"))
 
-    async def _speak_text(self, text: str) -> None:
+    async def _speak_text(self, text: str, follow_up: bool = False) -> None:
         async def once():
             yield text
-        await self._speak_stream(once())
+        await self._speak_stream(once(), follow_up)
 
-    async def _speak_stream(self, pieces) -> None:
+    async def _speak_stream(self, pieces, follow_up: bool = False) -> None:
         """Send reply text as it arrives and speak it sentence by sentence.
 
         Mood tags are stripped from the text shown on screen; each spoken sentence's tag becomes
         an Emote sent just before its audio.
         """
         sentences: asyncio.Queue[str | None] = asyncio.Queue()
-        speaker = asyncio.create_task(self._speak_worker(sentences))
+        speaker = asyncio.create_task(self._speak_worker(sentences, follow_up))
         splitter = SentenceSplitter()
         shown = TagStripper()
+        first = True
         try:
             async for piece in pieces:
+                if first and self.turn_t0:
+                    first = False
+                    log.info("[timing] first reply text %.2fs after end of speech", self._since_turn())
                 if text := shown.feed(piece):
                     await self.send(ReplyText(text))
                 for sentence in splitter.feed(piece):
@@ -343,25 +461,45 @@ class TerminalSession:
         finally:
             speaker.cancel()
 
-    async def _speak_worker(self, sentences: asyncio.Queue) -> None:
+    async def _speak_worker(self, sentences: asyncio.Queue, follow_up: bool = False) -> None:
         started = False
         try:
             while (sentence := await sentences.get()) is not None:
                 emotion, clean = parse_sentence(sentence)
                 if not any(c.isalnum() for c in clean):
                     continue
-                pcm = await asyncio.to_thread(self.brain.tts.synthesize, clean,
-                                              self.theme.voice, self.theme.speed)
+                t = time.monotonic()
+                pcm = await self._synthesize(clean)
                 if not started:
                     started = True
+                    if self.turn_t0:   # not for asides and reminders
+                        log.info("[timing] first audio %.2fs after end of speech (text-to-speech "
+                                 "%.2fs)", self._since_turn(), time.monotonic() - t)
+                        self.turn_t0 = 0.0
                     await self.send(State("speaking"))
-                    await self.send(AudioStart(self.brain.tts.sample_rate))
+                    await self.send(AudioStart(self.brain.tts.sample_rate, follow_up))
                 await self.send(Emote(emotion))
+                seconds = len(pcm) / 2 / self.brain.tts.sample_rate
+                self.audio_until = max(self.audio_until, time.monotonic()) + seconds
                 for i in range(0, len(pcm), AUDIO_CHUNK_BYTES):
                     await self.ws.send_bytes(pcm[i:i + AUDIO_CHUNK_BYTES])
         finally:
             if started and not self.ws.closed:
                 await self.send(AudioEnd())
+
+    async def _synthesize(self, text: str) -> bytes:
+        key = (text, self.theme.voice, self.theme.speed)
+        if key in self._speech_cache:
+            return self._speech_cache[key]
+        pcm = await asyncio.to_thread(self.brain.tts.synthesize, text,
+                                      self.theme.voice, self.theme.speed)
+        if len(text) <= SPEECH_CACHE_CHARS and len(self._speech_cache) < 100:
+            self._speech_cache[key] = pcm
+        return pcm
+
+    def _since_turn(self) -> float:
+        """Seconds since this turn's speech ended (or the message was typed)."""
+        return time.monotonic() - self.turn_t0 if self.turn_t0 else 0.0
 
 
 async def ws_handler(request: web.Request) -> web.WebSocketResponse:
@@ -378,7 +516,10 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                 session.on_audio(msg.data)
     finally:
         brain.sessions.discard(session)
+        session.close_file_requests()
         await session._cancel_turn()
+        if session._reminding:
+            session._reminding.cancel()
         log.info("terminal disconnected: %s", session.terminal_id)
     return ws
 
@@ -391,6 +532,7 @@ def build_app(settings: Settings) -> web.Application:
     app = web.Application()
     app["brain"] = Brain(settings)
     app.on_startup.append(app["brain"].on_startup)
+    app.on_cleanup.append(app["brain"].on_cleanup)
     app.router.add_get("/ws", ws_handler)
     app.router.add_get("/health", health)
     return app

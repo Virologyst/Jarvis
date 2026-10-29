@@ -35,6 +35,14 @@ idle again once playback drains           State(idle)
 ```
 
 - Everything streams: Jarvis starts speaking after the **first sentence**, not the whole reply.
+- A bare wake phrase ("Hey Jarvis.") is answered in code ("Yes, Sir?", cached audio) without a
+  Claude call, then the terminal listens for the request; the exchange is added to the
+  conversation so Claude has it.
+- End of speech: Silero VAD on 512-sample windows, and while listening a frame no louder than
+  `JARVIS_QUIET_FACTOR` (1.5) times the room's quiet level before the wake isn't speech, so a hum
+  the VAD mistakes for voice can't hold the mic open to the 25 s limit.
+- Timing: both sides log `[timing]` lines (wake heard, end of speech and why, speech-to-text,
+  each Claude round, first text, text-to-speech, first audio, mic lag) to find slow stages.
 - Tapping the button (or a new ListenStart) while Jarvis talks interrupts it.
 - Half-duplex for now: the mic is ignored while Jarvis thinks/speaks (no echo loops).
   True barge-in by voice needs echo cancellation — the speakerphone provides it; enable later.
@@ -85,6 +93,56 @@ speaker's name, ready for voice identification. Tasks have an optional due date 
 (Brisbane, via `clock.py`), a status (open, on hold, done) and notes Jarvis keeps itself. These
 tools change only Jarvis's own notebook, like the theme choice, so they run without an approval
 card; deleting moves a task to a bin it can be restored from.
+
+### Reminders
+A task can have reminders, saved with it in `data/tasks.json`. `set_task_reminder` (or
+`add_task`'s `reminder`) takes a Brisbane date and time or a time relative to the deadline ("an
+hour before", "the morning of") and reports the exact time back; it also snoozes the reminder just
+given. Jarvis asks whether and when to remind after adding a task. `reminders.py` checks every 30
+seconds; a due reminder on an open task is queued on every connected terminal and said, in persona,
+once that terminal is quiet (not listening, thinking, speaking or still playing). It's then marked
+delivered and saved, so it's said once, even across restarts. `AudioStart(follow_up=True)` makes an
+idle terminal open the mic afterwards, and the reminder is added to that terminal's conversation so
+"snooze it fifteen minutes" makes sense. One that fell due while the brain was off is still said
+unless the task is over an hour past its deadline (or, with no deadline, 12 hours late); done,
+deleted and on-hold tasks stay quiet.
+
+## Reading files
+`list_directory`, `read_file` and `search_files`, mainly for Craig's Obsidian vault (on his
+terminal, under `C:\Users\craig\Documents\Obsidian`). The reader is
+`protocol/jarvis_protocol/fileaccess.py`, shared by the brain (`brain/jarvis_brain/files.py`)
+and the terminals (`terminal/jarvis_terminal/files.py`), so both apply the same checks.
+Strictly read-only (files are only opened for reading), so no approval card. Paths must be
+absolute and on the C: drive; each is normalised and resolved (symlinks, junctions, `..`) and
+checked before and after resolving, so a link can't lead elsewhere. Refused, and left out of
+listings and searches: Jarvis's own checkout on that machine (settings, keys, task data,
+approval and upgrade machinery) and the upgrade worktrees, plus common secret stores (`.ssh`,
+`.aws`, `.claude`, browser profiles, Windows credential stores, `.env` files, key and
+password-database files). Reads return up to 12,000 characters with a note on where to read
+on; Obsidian canvas files come back as cards and connections; binary files are described, not
+read. Searches stop after 25 results or 8 seconds and skip system folders.
+
+### On a terminal
+A Windows terminal shares its drive by default (`--no-files` or `JARVIS_TERMINAL_FILES=0` turns
+it off; a Pi has no C: drive, so never does): its `Hello` says `files=True`, and the brain sends
+it `FileRequest(op, args)` for the three read operations, which the terminal checks and answers
+itself with a `FileReply` (20 s limit). The terminal answers only the ops in
+`TerminalFiles.ops`; anything else is refused, so a brain can't make it write. Each read tool
+takes a `device`: `brain`, `this terminal`, a terminal's name, or empty, meaning the brain if
+the path exists there and otherwise the terminal being spoken through. `list_file_devices`
+says which terminals are sharing. Results start with which machine they came from.
+
+## Writing files (brain only)
+`brain/jarvis_brain/filewrite.py`: `write_file` (create, replace or append), `edit_file` (change
+one exact passage), `create_folder` and `move_file` (move or rename; never over something
+already there). Nothing deletes. Each tool only plans the change and puts it on an approval
+card (`ApprovalGate.propose()`); it's made after approval, re-checked first. Refused: everything
+the reader refuses, plus Windows and program folders, AppData, hidden dot-folders, the top of
+the drive, and anything that runs: only text files (notes, text, canvas, JSON, CSV...) can be
+written, programs and scripts can't be moved or renamed into being, and a folder moves only if
+nothing inside it is private, a program or a link. Text is replaced atomically (written beside
+the file, then swapped in). Terminal writes can be added later as new `TerminalFiles.ops`, sent
+by the brain only from an approved card's action.
 
 ## Sir's project notes (Obsidian)
 `brain/jarvis_brain/vault.py` reads and updates the project notes in Sir's Obsidian vault
