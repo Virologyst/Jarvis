@@ -15,7 +15,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from jarvis_brain.approvals import ApprovalGate  # noqa: E402
 from jarvis_brain.selfupgrade import (  # noqa: E402
-    ALLOWED_TOOLS, DISALLOWED_TOOLS, HEALTH_MARKER, MAX_STRICT_OPTIONAL, UpgradeManager,
+    ALLOWED_TOOLS, DISALLOWED_TOOLS, DUMP_TOOLS, HEALTH_MARKER, MAX_STRICT_OPTIONAL,
+    UpgradeManager,
     _parse_claude_output, is_protected, tool_schema_problems,
 )
 
@@ -340,8 +341,37 @@ def test_jarvis_leaves_room_for_new_strict_tools() -> None:
 
 
 def test_jarvis_own_tools_fit_the_api_limits() -> None:
-    from jarvis_brain.tools import TOOLS
-    assert tool_schema_problems(TOOLS) == []
+    from jarvis_brain.tools import REQUEST_TOOLS
+    assert tool_schema_problems(REQUEST_TOOLS) == []
+
+
+def test_tool_search_rules() -> None:
+    search = {"type": "tool_search_tool_bm25_20251119", "name": "tool_search_tool_bm25"}
+    loaded, hidden = _tool("a", 0), dict(_tool("b", 0), defer_loading=True)
+    assert tool_schema_problems([search, loaded, hidden]) == []
+    no_search = tool_schema_problems([loaded, hidden])
+    assert no_search and "no tool search tool" in no_search[0]
+    assert any("every tool is deferred" in p for p in tool_schema_problems(
+        [dict(search, defer_loading=True), hidden]))
+    cached = tool_schema_problems([search, dict(hidden, cache_control={"type": "ephemeral"})])
+    assert cached and "cache_control: b" in cached[0]
+
+
+def test_jarvis_keeps_its_everyday_tools_loaded() -> None:
+    from jarvis_brain.tools import REQUEST_TOOLS, TOOL_SEARCH
+    assert REQUEST_TOOLS[0] == TOOL_SEARCH and not TOOL_SEARCH.get("defer_loading")
+    loaded = {t["name"] for t in REQUEST_TOOLS[1:] if not t.get("defer_loading")}
+    assert loaded == {"get_time", "tasks_for_day", "add_task", "update_task",
+                      "set_task_reminder"}
+    assert len(REQUEST_TOOLS) - 1 - len(loaded) >= 20          # the rest load on demand
+
+
+def test_upgrade_check_reads_what_a_conversation_sends() -> None:
+    import subprocess
+    out = subprocess.run([sys.executable, "-c", DUMP_TOOLS], capture_output=True, text=True,
+                         cwd=Path(__file__).resolve().parents[1], check=True).stdout
+    names = [t["name"] for t in json.loads(out)]
+    assert names[0] == "tool_search_tool_bm25" and "get_time" in names
 
 
 def test_upgrade_that_breaks_the_tools_is_blocked(setup, monkeypatch) -> None:

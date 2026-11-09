@@ -128,8 +128,11 @@ MAX_STRICT_TOOLS = 20      # and at most this many tools marked strict
 # Measured 2026-10-29: 39 settings across Jarvis's strict tools were accepted and 42 refused,
 # so leave a margin.
 MAX_STRICT_PROPERTIES = 30
-# Prints the upgraded brain's tool list as JSON, run inside the upgrade's worktree
-DUMP_TOOLS = "import json, jarvis_brain.tools as t; print(json.dumps(t.TOOLS))"
+# Prints the upgraded brain's tool list as JSON, run inside the upgrade's worktree: what a
+# conversation actually sends (the tool search tool included), or the plain list before that
+DUMP_TOOLS = ("import json, jarvis_brain.tools as t; "
+              "print(json.dumps(getattr(t, 'REQUEST_TOOLS', t.TOOLS)))")
+_TOOL_SEARCH_TYPES = ("tool_search_tool_bm25", "tool_search_tool_regex")
 
 
 def tool_schema_problems(tools: list[dict]) -> list[str]:
@@ -159,6 +162,19 @@ def tool_schema_problems(tools: list[dict]) -> list[str]:
     dupes = sorted({n for n in names if names.count(n) > 1})
     if dupes:
         problems.append("two tools share a name: " + ", ".join(map(str, dupes)))
+    # Tool search: hidden ("deferred") tools are only found through a search tool, at least one
+    # tool must stay loaded, and a hidden tool can't carry a cache marker
+    deferred = [t for t in tools if t.get("defer_loading")]
+    searcher = any(str(t.get("type", "")).startswith(_TOOL_SEARCH_TYPES) and
+                   not t.get("defer_loading") for t in tools)
+    if deferred and not searcher:
+        problems.append("some tools are hidden until searched for (defer_loading) but there's "
+                        "no tool search tool, so Jarvis could never use them")
+    if tools and len(deferred) == len(tools):
+        problems.append("every tool is deferred; the API needs at least one loaded up front")
+    cached = sorted(str(t.get("name")) for t in deferred if t.get("cache_control"))
+    if cached:
+        problems.append("deferred tools can't carry cache_control: " + ", ".join(cached))
     return problems
 
 

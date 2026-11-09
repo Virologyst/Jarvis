@@ -98,6 +98,10 @@ class Conversation:
                     return
 
                 self.messages.append({"role": "assistant", "content": final.content})
+                if final.stop_reason == "pause_turn":
+                    # A server-side tool (tool search) paused a long turn: sending the
+                    # history back as it is lets Claude carry on where it stopped.
+                    continue
                 if final.stop_reason != "tool_use":
                     return
                 self.messages.append({"role": "user", "content": await self._run_tools(final)})

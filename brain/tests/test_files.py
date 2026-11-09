@@ -235,7 +235,8 @@ def test_reading_tools_show_no_cards_and_nothing_deletes(drive: Path) -> None:
     assert {"list_directory", "read_file", "search_files", "list_file_devices"} <= names
     for word in ("delete", "remove", "erase"):
         assert not any(word in n for n in names if n != "delete_task"), word
-    assert tool_schema_problems(TOOLS) == []
+    from jarvis_brain.tools import REQUEST_TOOLS
+    assert tool_schema_problems(REQUEST_TOOLS) == []
     for name in ("list_directory", "read_file", "search_files", "write_file", "edit_file",
                  "create_folder", "move_file", "list_file_devices"):
         assert name in SYSTEM_PROMPT

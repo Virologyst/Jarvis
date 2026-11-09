@@ -45,7 +45,7 @@ from .stt import Transcriber
 from .themes import DEFAULT_THEME, THEMES, ThemeStore, resolve
 from .tasks import TaskStore
 from .vault import Vault
-from .tools import TOOLS, ToolBox
+from .tools import REQUEST_TOOLS, ToolBox
 from .tts import make_speaker
 from .voicecommands import parse_voice_decision, pick_card
 from .wakecheck import bare_wake_reply, heard_wake_phrase
@@ -153,7 +153,7 @@ class TerminalSession:
                         file_terminals=lambda: brain.file_terminals(),
                         vault=getattr(brain, "vault", None))
         self.conversation = Conversation(brain.client, s.model, s.effort, s.idle_reset_minutes,
-                                         tools=TOOLS, run_tool=tools.run)
+                                         tools=REQUEST_TOOLS, run_tool=tools.run)
         self.listening = False
         self.listen_reason = ""
         self.always_listening = False   # permanent listening, per terminal; off at startup

@@ -73,6 +73,39 @@ def test_tool_call_runs_and_result_goes_back() -> None:
     assert "tools" in client.requests[0]
 
 
+def test_tool_search_blocks_go_back_and_a_paused_turn_carries_on() -> None:
+    """Tool search runs on Anthropic's side: its blocks stay in the history as they came, no
+    tool_result is sent for them, and a turn it pauses is continued, not dropped."""
+    calls = []
+
+    async def run_tool(name, args):
+        calls.append(name)
+        return "Two projects."
+
+    search = [NS(type="server_tool_use", id="srvtoolu_1", name="tool_search_tool_bm25",
+                 input={"query": "project notes"}),
+              NS(type="tool_search_tool_result", tool_use_id="srvtoolu_1",
+                 content=NS(type="tool_search_tool_search_result", tool_references=[]))]
+    paused = NS(stop_reason="pause_turn", content=search)
+    found = NS(stop_reason="tool_use", content=[tool_use("t1", "vault_projects", {})])
+    done = NS(stop_reason="end_turn", content=[NS(type="text", text="Two projects, Sir.")])
+    client = FakeClient([("", paused), ("", found), ("Two projects, Sir.", done)])
+    conv = Conversation(client, "m", "low", 10, tools=[{"name": "vault_projects"}],
+                        run_tool=run_tool)
+
+    async def go():
+        return "".join([t async for t in conv.reply("How are my projects?")])
+
+    assert "Two projects" in asyncio.run(go())
+    assert calls == ["vault_projects"]                    # nothing run for the search
+    roles = [m["role"] for m in conv.messages]
+    assert roles == ["user", "assistant", "assistant", "user", "assistant"]
+    assert conv.messages[1]["content"] is search          # sent back unchanged
+    assert client.requests[1]["messages"][-1]["content"] is search
+    results = conv.messages[3]["content"]
+    assert [r["tool_use_id"] for r in results] == ["t1"]
+
+
 def test_tool_error_is_reported_not_raised() -> None:
     async def run_tool(name, args):
         raise RuntimeError("boom")

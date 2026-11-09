@@ -513,6 +513,25 @@ _STRICT = {"request_self_upgrade", "add_task", "update_task", "delete_task", "va
 for _tool in TOOLS:
     _tool["strict"] = _tool["name"] in _STRICT
 
+# --- Tool search ---------------------------------------------------------------------------------
+# Loading every tool's definition into every request slows Jarvis down and makes it pick less
+# well as tools are added. So only the few tools used in most conversations are loaded up front;
+# the rest are "deferred": still sent, but Claude finds them with the search tool (Anthropic runs
+# the search, inside the same request) when it needs them, and they stay loaded for the rest of
+# the conversation. A new tool is deferred unless it's added here. Deferring doesn't change the
+# strict limits above: those count every tool, loaded or not.
+_ALWAYS_LOADED = {"get_time", "tasks_for_day", "add_task", "update_task", "set_task_reminder"}
+for _tool in TOOLS:
+    if _tool["name"] in _ALWAYS_LOADED:
+        _tool.pop("defer_loading", None)
+    else:
+        _tool["defer_loading"] = True
+
+# Plain-language search (BM25) over tool names, descriptions and settings. Never deferred.
+TOOL_SEARCH = {"type": "tool_search_tool_bm25_20251119", "name": "tool_search_tool_bm25"}
+# What a conversation sends: the search tool plus every tool (see llm.Conversation)
+REQUEST_TOOLS = [TOOL_SEARCH, *TOOLS]
+
 
 class ToolBox:
     """Runs tool calls for one terminal's conversation; shows any cards on that terminal."""

@@ -303,7 +303,8 @@ def test_tools_run_through_the_toolbox(vault: Vault):
 
 
 def test_vault_tools_fit_the_api_limits_and_persona_mentions_them():
-    assert tool_schema_problems(TOOLS) == []
+    from jarvis_brain.tools import REQUEST_TOOLS
+    assert tool_schema_problems(REQUEST_TOOLS) == []
     names = {t["name"] for t in TOOLS}
     for name in ("vault_projects", "vault_read", "vault_add_task", "vault_update_task",
                  "vault_update_project", "vault_new_project", "vault_add_point"):
