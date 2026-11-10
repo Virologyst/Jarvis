@@ -556,6 +556,81 @@ TOOLS += [
 ]
 _EMAIL_TOOLS = {"email_inbox", "email_read", "email_search", "email_important"}
 
+# --- Working in Obsidian with Sir (live, through a terminal's Local REST API plugin) ------------
+# Sent to a terminal as FileRequests ("obsidian_*"); the terminal calls Obsidian on its machine
+# (terminal/jarvis_terminal/obsidian.py). Unlike the vault_* tools, these see what Sir has open
+# and edit through Obsidian itself. Writing Sir's own notes needs no card, but never replaces a
+# whole note and only creates notes that don't exist.
+_NOTE = {"type": "string",
+         "description": "The note's name or vault path; leave empty for the note open now."}
+_HEADING = {"type": "string",
+            "description": "A heading in the note, nested ones as 'Parent > Child'. Optional."}
+TOOLS += [
+    {
+        "name": "obsidian_open_note",
+        "description": (
+            "What Sir has open in Obsidian right now: the note's path, headings and text. Use "
+            "for 'this note', 'what I'm looking at', before editing the open note, and to start "
+            "mind mapping together."),
+        "input_schema": _schema({}, []),
+    },
+    {
+        "name": "obsidian_read",
+        "description": ("Read a note in Obsidian, or one section of it under a heading."),
+        "input_schema": _schema({"note": _NOTE, "heading": _HEADING}, []),
+    },
+    {
+        "name": "obsidian_write",
+        "description": (
+            "Write in Sir's Obsidian notes, live on his screen. append adds to the end of the "
+            "note or under a heading (made if missing): a new mind map branch is a heading or "
+            "a nested bullet under the right heading. prepend adds at the top. replace swaps out "
+            "one heading's section (only when Sir asks to rewrite it). create makes a new note "
+            "(note = its name or path; it must not exist). Markdown text: '- ' bullets, nested "
+            "with two spaces; '- [ ] ' tasks."),
+        "input_schema": _schema(
+            {"note": _NOTE, "heading": _HEADING,
+             "action": {"type": "string", "enum": ["append", "prepend", "replace", "create"]},
+             "text": {"type": "string", "description": "Markdown to write."}},
+            ["action", "text"]),
+    },
+    {
+        "name": "obsidian_show",
+        "description": "Open a note on Sir's screen in Obsidian ('show me the J.A.R.V.I.S notes').",
+        "input_schema": _schema({"note": {"type": "string",
+                                          "description": "The note's name or vault path."}},
+                                ["note"]),
+    },
+    {
+        "name": "obsidian_search",
+        "description": "Find notes in Sir's Obsidian vault that mention some words.",
+        "input_schema": _schema({"query": {"type": "string", "description": "Words to find."}},
+                                ["query"]),
+    },
+    {
+        "name": "obsidian_canvas",
+        "description": (
+            "Add cards and arrows to an Obsidian canvas board (a visual whiteboard), making the "
+            "board if it doesn't exist. A card placed 'near' an existing card goes to its right "
+            "with an arrow from it, which grows a visual mind map. links join two cards by "
+            "their text, with an optional label."),
+        "input_schema": _schema(
+            {"canvas": {"type": "string", "description": "The board's name or path."},
+             "cards": {"type": "array", "items": {"type": "object", "properties": {
+                 "text": {"type": "string", "description": "Short card text (Markdown)."},
+                 "near": {"type": "string", "description": "Text of the card it branches from."}},
+                 "required": ["text"]}},
+             "links": {"type": "array", "items": {"type": "object", "properties": {
+                 "from": {"type": "string"}, "to": {"type": "string"},
+                 "label": {"type": "string"}}, "required": ["from", "to"]}}},
+            ["canvas"]),
+    },
+]
+# tool name -> the terminal's op
+_OBSIDIAN_OPS = {"obsidian_open_note": "obsidian_active", "obsidian_read": "obsidian_read",
+                 "obsidian_write": "obsidian_edit", "obsidian_show": "obsidian_open",
+                 "obsidian_search": "obsidian_search", "obsidian_canvas": "obsidian_canvas"}
+
 # The API allows at most 20 strict tools per request (and 24 optional settings across them).
 # Strict mode guarantees a tool's input matches its schema, but the API compiles all strict
 # schemas in a request together and refuses when they're too big: at most 20 strict tools, 24
@@ -601,8 +676,10 @@ class ToolBox:
                  terminal_id: Callable[[], str] | None = None,
                  file_terminals: Callable[[], dict[str, RemoteFiles]] | None = None,
                  vault: Vault | None = None,
-                 mailbox: Mailbox | None = None):
+                 mailbox: Mailbox | None = None,
+                 obsidian_terminals: Callable[[], dict[str, RemoteFiles]] | None = None):
         self.upgrades = upgrades
+        self.obsidian_terminals = obsidian_terminals or dict
         self.show_card = show_card
         self.current_theme = current_theme
         self.set_theme = set_theme
@@ -624,6 +701,8 @@ class ToolBox:
                                           else v) for k, v in args.items()})
         if name == "list_file_devices":
             return self._describe_devices()
+        if name in _OBSIDIAN_OPS:
+            return await self._run_obsidian_tool(name, args)
         if name in _FILE_TOOLS:
             try:
                 return await self._run_read_tool(name, args)
@@ -814,6 +893,32 @@ class ToolBox:
         if name == "add_person":
             return t.add_person(arg("name") or "")
         return t.list_people()
+
+    async def _run_obsidian_tool(self, name: str, args: dict) -> str:
+        """Ask the terminal that reaches Obsidian: the one being spoken through if it can, else
+        the only one that can."""
+        terminals, here = self.obsidian_terminals(), self.terminal_id()
+        if not terminals:
+            return ("Obsidian isn't reachable right now: it works through the computer Obsidian "
+                    "runs on, with its terminal running, Obsidian open and the Local REST API "
+                    "plugin connected (docs/obsidian.md).")
+        if here in terminals:
+            remote = terminals[here]
+        elif len(terminals) == 1:
+            remote = next(iter(terminals.values()))
+        else:
+            return "Obsidian is open on " + ", ".join(sorted(terminals)) + "; which one?"
+        clean = {k: v for k, v in args.items() if v not in (None, "")}
+        if name == "obsidian_canvas":
+            clean["cards"] = [c if isinstance(c, dict) else {"text": str(c)}
+                              for c in clean.get("cards") or []]
+            clean["links"] = [ln for ln in clean.get("links") or [] if isinstance(ln, dict)]
+        else:
+            clean = {k: str(v) for k, v in clean.items()}
+        try:
+            return await remote(_OBSIDIAN_OPS[name], clean)
+        except FileAccessError as e:
+            return str(e)
 
     async def _run_email_tool(self, name: str, args: dict) -> str:
         m = self.mailbox

@@ -34,10 +34,12 @@ def _message(type_name: str):
 @_message("hello")
 @dataclass
 class Hello:
-    """files: this terminal lets the brain read its drive (FileRequest), read-only."""
+    """files: this terminal lets the brain read its drive (FileRequest), read-only.
+    obsidian: it answers "obsidian_*" FileRequests through Obsidian's Local REST API plugin."""
     terminal_id: str
     protocol: int = 1
     files: bool = False
+    obsidian: bool = False
 
 
 @_message("listen_start")

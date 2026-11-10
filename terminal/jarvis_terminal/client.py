@@ -103,9 +103,10 @@ def _load_vad():
 class Terminal:
     def __init__(self, brain_url: str, terminal_id: str, ui_port: int,
                  wake_threshold: float, use_wake: bool, mic_device=None, speaker_device=None,
-                 eye=None, devices: DeviceChoice | None = None, files=None):
+                 eye=None, devices: DeviceChoice | None = None, files=None, obsidian=None):
         self.eye = eye  # jarvis_terminal.eye.Eye, or None
         self.files = files  # jarvis_terminal.files.TerminalFiles (read-only), or None
+        self.obsidian = obsidian  # jarvis_terminal.obsidian.ObsidianBridge, or None
         self.brain_url = brain_url
         self.terminal_id = terminal_id
         self.ui_port = ui_port
@@ -217,7 +218,12 @@ class Terminal:
     async def on_file_request(self, msg: FileRequest) -> None:
         """The brain wants to read something on this machine: answer it (read-only), off the
         event loop so audio keeps flowing during a long search."""
-        if self.shares_files:
+        if msg.op.startswith("obsidian_"):
+            if self.obsidian and self.obsidian.available:
+                ok, text = await asyncio.to_thread(self.obsidian.handle, msg.op, msg.args)
+            else:
+                ok, text = False, "Obsidian isn't connected on this terminal."
+        elif self.shares_files:
             ok, text = await asyncio.to_thread(self.files.handle, msg.op, msg.args)
         else:
             ok, text = False, "This terminal isn't sharing its files."
@@ -486,8 +492,9 @@ class Terminal:
                                                max_msg_size=4 * 1024 * 1024) as ws:
                         self.brain_ws = ws
                         delay = 1.0
-                        await ws.send_str(encode(Hello(self.terminal_id,
-                                                       files=self.shares_files)))
+                        await ws.send_str(encode(Hello(
+                            self.terminal_id, files=self.shares_files,
+                            obsidian=bool(self.obsidian and self.obsidian.available))))
                         if self.always_listening:   # the brain restarted: carry on, quietly
                             await ws.send_str(encode(ListenMode(True, quiet=True)))
                         await self.to_ui({"type": "connection", "connected": True})

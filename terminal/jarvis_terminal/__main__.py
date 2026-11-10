@@ -64,6 +64,11 @@ def main() -> None:
     if files and files.available:
         logging.getLogger(__name__).info("Jarvis can read this machine's files (read-only); "
                                          "--no-files turns that off")
+    from .obsidian import ObsidianBridge
+    obsidian = ObsidianBridge()
+    if obsidian.available:
+        logging.getLogger(__name__).info("Jarvis can work in Obsidian here (Local REST API at %s)",
+                                         obsidian.url)
     eye = None
     if not args.no_eye:
         from .eye import Eye
@@ -71,7 +76,7 @@ def main() -> None:
     terminal = Terminal(
         brain_url=args.brain, terminal_id=args.id, ui_port=args.ui_port,
         wake_threshold=args.wake_threshold, use_wake=not args.no_wake,
-        eye=eye, devices=devices, files=files,
+        eye=eye, devices=devices, files=files, obsidian=obsidian,
     )
     keyboard = not args.no_keyboard and sys.stdin is not None and sys.stdin.isatty()
     if keyboard:

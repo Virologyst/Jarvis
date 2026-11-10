@@ -152,6 +152,11 @@ class Brain:
         return {s.terminal_id: s.remote_file for s in list(self.sessions)
                 if s.shares_files and not s.ws.closed}
 
+    def obsidian_terminals(self) -> dict:
+        """Connected terminals that reach Obsidian (its Local REST API): name -> (op, args) -> text."""
+        return {s.terminal_id: s.remote_file for s in list(self.sessions)
+                if s.uses_obsidian and not s.ws.closed}
+
     async def broadcast(self, msg) -> None:
         for s in list(self.sessions):
             await s.send(msg)
@@ -173,11 +178,14 @@ class TerminalSession:
         self.theme = THEMES[DEFAULT_THEME]
         s = brain.settings
         self.shares_files = False             # its Hello said the brain may read its drive
+        self.uses_obsidian = False            # ... and that it reaches Obsidian on that machine
         self._file_waits: dict[str, asyncio.Future] = {}   # FileRequests awaiting a FileReply
         tools = ToolBox(brain.upgrades, self.send, current_theme=lambda: self.theme.title,
                         set_theme=self.set_theme, tasks=brain.tasks, approvals=brain.approvals,
                         terminal_id=lambda: self.terminal_id,
                         file_terminals=lambda: brain.file_terminals(),
+                        obsidian_terminals=lambda: (brain.obsidian_terminals()
+                                                    if hasattr(brain, "obsidian_terminals") else {}),
                         vault=getattr(brain, "vault", None),
                         mailbox=getattr(brain, "mailbox", None))
         self.conversation = Conversation(brain.client, s.model, s.effort, s.idle_reset_minutes,
@@ -265,8 +273,10 @@ class TerminalSession:
         if isinstance(msg, Hello):
             self.terminal_id = msg.terminal_id
             self.shares_files = bool(msg.files)
-            log.info("terminal connected: %s%s", self.terminal_id,
-                     " (sharing its files, read-only)" if self.shares_files else "")
+            self.uses_obsidian = bool(getattr(msg, "obsidian", False))
+            log.info("terminal connected: %s%s%s", self.terminal_id,
+                     " (sharing its files, read-only)" if self.shares_files else "",
+                     " (with Obsidian)" if self.uses_obsidian else "")
             await self.send(Welcome())
             self.theme = self.brain.themes.get(self.terminal_id)
             await self.send(SetTheme(self.theme.name))
