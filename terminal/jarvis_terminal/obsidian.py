@@ -47,10 +47,9 @@ def split_heading(heading: str | None) -> list[str]:
     return [p.lstrip("#").strip() for p in parts if p.strip()]
 
 
-def section(text: str, path: list[str]) -> str | None:
-    """The text under a heading path (heading line included), or None if there's no such heading.
-    Each later heading must sit inside the one before it."""
-    lines = text.splitlines()
+def section_lines(lines: list[str], path: list[str]) -> tuple[int, int] | None:
+    """(heading line, line after the section) for a heading path, or None if there's no such
+    heading. Each later heading must sit inside the one before it."""
     marks = [(i, len(m.group(1)), m.group(2).strip().lower()) for i, line in enumerate(lines)
              if (m := re.match(r"^(#{1,6})\s+(.*?)\s*#*\s*$", line))]
     start, end, level = -1, len(lines), 0
@@ -61,7 +60,39 @@ def section(text: str, path: list[str]) -> str | None:
             return None
         start, level = hit
         end = next((i for i, n, _ in marks if i > start and n <= level), len(lines))
-    return "\n".join(lines[start:end])
+    return start, end
+
+
+def section(text: str, path: list[str]) -> str | None:
+    """The text under a heading path (heading line included), or None if there's no such heading."""
+    lines = text.splitlines()
+    found = section_lines(lines, path)
+    return None if found is None else "\n".join(lines[found[0]:found[1]])
+
+
+def insert(text: str, new: str, path: list[str], at_top: bool) -> str | None:
+    """The note with `new` added at the end (or top) of a heading's section, or of the whole note
+    (path empty; the top is below any front matter), keeping lists tight: no blank line between
+    the last bullet and the new one. None if the heading isn't there."""
+    lines = text.splitlines()
+    if path:
+        found = section_lines(lines, path)
+        if found is None:
+            return None
+        start, end = found
+        start += 1
+    else:
+        front = re.match(r"^---\n.*?\n---\n", text, re.S)
+        start, end = (front.group(0).count("\n") if front else 0), len(lines)
+    if at_top:
+        spot = start
+    else:
+        spot = end
+        while spot > start and not lines[spot - 1].strip():
+            spot -= 1
+    added = new.strip("\n").splitlines()
+    out = lines[:spot] + added + lines[spot:]
+    return "\n".join(out) + ("\n" if text.endswith("\n") or not text else "")
 
 
 def headings(text: str) -> list[str]:
@@ -87,20 +118,26 @@ class ObsidianBridge:
 
     # --- HTTP ---------------------------------------------------------------------------------
 
-    def _urlopen(self, req: urllib.request.Request) -> tuple[int, str]:
+    def _urlopen(self, req: urllib.request.Request) -> tuple[int, str, dict]:
         try:
             with urllib.request.urlopen(req, timeout=TIMEOUT_S, context=self._ssl) as r:
-                return r.status, r.read().decode("utf-8", "replace")
+                return r.status, r.read().decode("utf-8", "replace"), dict(r.headers)
         except urllib.error.HTTPError as e:
-            return e.code, e.read().decode("utf-8", "replace")
+            return e.code, e.read().decode("utf-8", "replace"), dict(e.headers or {})
 
     def _call(self, method: str, path: str, body: str | bytes | None = None,
               headers: dict | None = None, ok: tuple = (200, 204)) -> str:
+        return self._exchange(method, path, body, headers, ok)[0]
+
+    def _exchange(self, method: str, path: str, body: str | bytes | None = None,
+                  headers: dict | None = None, ok: tuple = (200, 204)) -> tuple[str, dict]:
+        """(text, response headers)."""
         data = body.encode("utf-8") if isinstance(body, str) else body
         req = urllib.request.Request(self.url + path, data=data, method=method, headers={
             "Authorization": f"Bearer {self.key}", **(headers or {})})
         try:
-            status, text = self._open(req)
+            status, text, *rest = self._open(req)
+            reply_headers = {k.lower(): v for k, v in (rest[0] if rest else {}).items()}
         except (urllib.error.URLError, OSError) as e:
             raise ObsidianError("Obsidian isn't answering on this computer. Is it open, with the "
                                 "Local REST API plugin switched on?") from e
@@ -109,13 +146,16 @@ class ObsidianBridge:
                                 "needs to match the Local REST API plugin's key.")
         if status == 404:
             raise ObsidianError("Obsidian couldn't find that.")
+        if status == 412:
+            raise ObsidianError("The note kept changing as I wrote (412), so I left it alone. "
+                                "Try again in a moment.")
         if status not in ok:
             try:
                 why = json.loads(text).get("message") or text
             except ValueError:
                 why = text
             raise ObsidianError(f"Obsidian said no ({status}): {str(why)[:300]}")
-        return text
+        return text, reply_headers
 
     @staticmethod
     def _q(path: str) -> str:
@@ -232,22 +272,37 @@ class ObsidianBridge:
             raise ObsidianError("There's nothing to write.")
         api, path = self._target(note)
         parts = split_heading(heading)
-        if not parts:
-            if action == "replace":
+        if action == "replace":
+            if not parts:
                 raise ObsidianError("I only replace a section under a heading, never a whole note.")
-            if action == "append":
-                self._call("POST", api, text if text.startswith("\n") else "\n" + text,
-                           {"Content-Type": "text/markdown"})
-                return f"Added to the end of {path}."
-            current = self._call("GET", api, headers={"Accept": "text/markdown"})
-            body = re.match(r"^---\n.*?\n---\n", current, re.S)   # keep front matter on top
-            cut = body.end() if body else 0
-            self._call("PUT", api, current[:cut] + text.rstrip("\n") + "\n" + current[cut:],
-                       {"Content-Type": "text/markdown"})
-            return f"Added to the top of {path}."
-        self._patch(api, action, parts, text)
-        done = {"append": "Added under", "prepend": "Added at the top of", "replace": "Replaced"}
-        return f"{done[action]} {' > '.join(parts)} in {path}."
+            self._patch(api, action, parts, text)
+            return f"Replaced {' > '.join(parts)} in {path}."
+        if not self._splice(api, text, parts, action == "prepend"):
+            self._patch(api, action, parts, text)       # no such heading: the plugin makes it
+        if parts:
+            where = ("at the top of " if action == "prepend" else "under ") + " > ".join(parts)
+            return f"Added {where} in {path}."
+        return f"Added to the {'top' if action == 'prepend' else 'end'} of {path}."
+
+    def _splice(self, api: str, text: str, parts: list[str], at_top: bool) -> bool:
+        """Add text into the note ourselves (the plugin's own append leaves a blank line that
+        splits a list), saved only if the note hasn't changed since it was read (If-Match), so
+        Sir's typing is never overwritten; tries twice. False if the heading isn't there."""
+        for attempt in range(2):
+            current, info = self._exchange("GET", api, headers={"Accept": "text/markdown"})
+            updated = insert(current, text, parts, at_top)
+            if updated is None:
+                return False
+            tag = info.get("etag")
+            try:
+                self._call("PUT", api, updated, {"Content-Type": "text/markdown",
+                                                 **({"If-Match": tag} if tag else {})})
+                return True
+            except ObsidianError as e:
+                if "(412)" not in str(e) or attempt:
+                    raise
+                log.info("obsidian: note changed while writing; trying again")
+        return True
 
     def _patch(self, api: str, action: str, parts: list[str], text: str) -> None:
         """Edit under a heading, making the heading if it's missing. The plugin's newer API takes
@@ -344,7 +399,7 @@ class ObsidianBridge:
             edges.append(edge)
             linked += 1
         self._call("PUT", "/vault/" + self._q(path), json.dumps(board, indent="\t"),
-                   {"Content-Type": "application/json"})
+                   {"Content-Type": "text/markdown"})   # the plugin mangles application/json
         self._files = None
         return (f"{'Updated' if exists else 'Made'} the board {path}: {added} card"
                 f"{'' if added == 1 else 's'} and {linked} link{'' if linked == 1 else 's'} added."

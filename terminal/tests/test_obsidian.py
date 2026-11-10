@@ -22,6 +22,7 @@ class FakeObsidian:
                                     "Templates/Project.md": "x", ".obsidian/app.json": "{}"})
         self.active = active
         self.old_patch = old_patch
+        self.typing = 0        # saves to refuse (412) because "Sir typed" in between
         self.calls = []
 
     def __call__(self, req):
@@ -48,8 +49,14 @@ class FakeObsidian:
                     return 404, "{}"
                 if "note+json" in headers.get("accept", ""):
                     return 200, json.dumps({"path": name, "content": self.files[name]})
-                return 200, self.files[name]
+                return 200, self.files[name], {"ETag": str(hash(self.files[name]))}
             if method == "PUT":
+                if "if-match" in headers:
+                    if self.typing:
+                        self.typing -= 1
+                        self.files[name] = self.files[name].replace("# Home\n", "# Home\ntyped\n")
+                        return 412, json.dumps({"message": "changed"})
+                    assert headers["if-match"] == str(hash(self.files[name]))
                 self.files[name] = body
                 return 204, ""
             if method == "POST":
@@ -110,21 +117,46 @@ def test_open_note_and_reading_a_section():
     assert not ok and "has no heading Nope. Its headings: Home." in text
 
 
-def test_writing_under_headings_new_and_old_api():
+def test_adding_under_a_heading_keeps_the_list_tight():
+    b, fake = bridge()
+    ok, text = b.handle("obsidian_edit", {"action": "append", "heading": "Ideas",
+                                          "text": "- mind mapping\n  - canvas"})
+    assert ok and text == "Added under Ideas in Projects/J.A.R.V.I.S.md."
+    assert "## Ideas\n- voice\n- mind mapping\n  - canvas\n## Log" in \
+        fake.files["Projects/J.A.R.V.I.S.md"]
+    b.handle("obsidian_edit", {"action": "prepend", "heading": "Log", "text": "- newest"})
+    assert "## Log\n- newest\n- started\n" in fake.files["Projects/J.A.R.V.I.S.md"]
+    assert not any(c[0] == "PATCH" for c in fake.calls)
+
+
+def test_missing_headings_and_replace_use_the_plugin_new_and_old_api():
     for old in (False, True):
         b, fake = bridge(old_patch=old)
-        ok, text = b.handle("obsidian_edit", {"action": "append", "heading": "Ideas",
-                                              "text": "- mind mapping\n  - canvas"})
-        assert ok and text == "Added under Ideas in Projects/J.A.R.V.I.S.md."
-        assert "- voice\n- mind mapping\n  - canvas" in fake.files["Projects/J.A.R.V.I.S.md"]
+        ok, text = b.handle("obsidian_edit", {"action": "append", "heading": "Risks",
+                                              "text": "- sync"})
+        assert ok and "## Risks\n- sync" in fake.files["Projects/J.A.R.V.I.S.md"]
+        ok, text = b.handle("obsidian_edit", {"action": "replace", "heading": "Log",
+                                              "text": "- redone"})
+        assert text == "Replaced Log in Projects/J.A.R.V.I.S.md."
+        assert "## Log\n- redone" in fake.files["Projects/J.A.R.V.I.S.md"]
     patches = [c for c in fake.calls if c[0] == "PATCH"]
     assert patches[-1][2]["target-delimiter"] == "::"
+
+
+def test_never_overwrites_typing_that_happened_meanwhile():
+    b, fake = bridge()
+    fake.typing = 1        # Sir types once between Jarvis reading and saving
+    b.handle("obsidian_edit", {"note": "Home", "text": "- a"})
+    assert fake.files["Home.md"] == "# Home\ntyped\n- a\n"
+    fake.typing = 5        # keeps typing: give up rather than overwrite
+    ok, text = b.handle("obsidian_edit", {"note": "Home", "text": "- b"})
+    assert not ok and "(412)" in text and "- b" not in fake.files["Home.md"]
 
 
 def test_append_prepend_create_and_never_replace_a_whole_note():
     b, fake = bridge()
     assert b.handle("obsidian_edit", {"note": "Home", "text": "- a"})[1] == "Added to the end of Home.md."
-    assert fake.files["Home.md"] == "# Home\n\n- a"
+    assert fake.files["Home.md"] == "# Home\n- a\n"
     b.handle("obsidian_edit", {"action": "prepend", "text": "Top line"})
     assert fake.files["Projects/J.A.R.V.I.S.md"].startswith("---\nstatus: active\n---\nTop line\n# J")
     ok, text = b.handle("obsidian_edit", {"note": "Home", "action": "replace", "text": "x"})
