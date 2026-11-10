@@ -610,10 +610,17 @@ TOOLS += [
     {
         "name": "obsidian_canvas",
         "description": (
-            "Add cards and arrows to an Obsidian canvas board (a visual whiteboard), making the "
-            "board if it doesn't exist. A card placed 'near' an existing card goes to its right "
-            "with an arrow from it, which grows a visual mind map. links join two cards by "
-            "their text, with an optional label."),
+            "Add, change and remove cards and arrows on an Obsidian canvas board (a visual "
+            "whiteboard), making the board if it doesn't exist. A card placed 'near' an "
+            "existing card goes to its right with an arrow from it, which grows a visual mind "
+            "map. links join two cards by their text, with an optional label. To keep a board "
+            "up to date: edit_cards changes a card's text, colour, position or size; "
+            "remove_cards removes cards and their arrows; edit_links changes a link's label "
+            "(empty label removes it); remove_links removes links. Cards are named by id, "
+            "exact text or a part of the text only one card has; links by their from and to "
+            "cards (or id). If a card or link is missing or ambiguous nothing changes and the "
+            "candidates come back: pick one and try again. Removals go on an approval card. "
+            "Read the board first (read_file) to see its cards when unsure."),
         "input_schema": _schema(
             {"canvas": {"type": "string", "description": "The board's name or path."},
              "cards": {"type": "array", "items": {"type": "object", "properties": {
@@ -622,7 +629,27 @@ TOOLS += [
                  "required": ["text"]}},
              "links": {"type": "array", "items": {"type": "object", "properties": {
                  "from": {"type": "string"}, "to": {"type": "string"},
-                 "label": {"type": "string"}}, "required": ["from", "to"]}}},
+                 "label": {"type": "string"}}, "required": ["from", "to"]}},
+             "edit_cards": {"type": "array", "items": {"type": "object", "properties": {
+                 "card": {"type": "string", "description": "The card's id or text."},
+                 "text": {"type": "string", "description": "New text (Markdown)."},
+                 "color": {"type": "string",
+                           "description": "red, orange, yellow, green, cyan, purple, #hex, "
+                                          "or none."},
+                 "x": {"type": "number"}, "y": {"type": "number"},
+                 "width": {"type": "number"}, "height": {"type": "number"}},
+                 "required": ["card"]}},
+             "remove_cards": {"type": "array", "items": {
+                 "type": "string", "description": "A card's id or text."}},
+             "edit_links": {"type": "array", "items": {"type": "object", "properties": {
+                 "from": {"type": "string"}, "to": {"type": "string"},
+                 "id": {"type": "string"},
+                 "current_label": {"type": "string",
+                                   "description": "Picks one if several join the same cards."},
+                 "label": {"type": "string", "description": "New label; empty removes it."}}}},
+             "remove_links": {"type": "array", "items": {"type": "object", "properties": {
+                 "from": {"type": "string"}, "to": {"type": "string"},
+                 "id": {"type": "string"}, "current_label": {"type": "string"}}}}},
             ["canvas"]),
     },
 ]
@@ -910,15 +937,57 @@ class ToolBox:
             return "Obsidian is open on " + ", ".join(sorted(terminals)) + "; which one?"
         clean = {k: v for k, v in args.items() if v not in (None, "")}
         if name == "obsidian_canvas":
-            clean["cards"] = [c if isinstance(c, dict) else {"text": str(c)}
-                              for c in clean.get("cards") or []]
-            clean["links"] = [ln for ln in clean.get("links") or [] if isinstance(ln, dict)]
+            clean = self._tidy_canvas(clean)
+            if clean.get("remove_cards") or clean.get("remove_links"):
+                return await self._propose_canvas(remote, clean)
         else:
             clean = {k: str(v) for k, v in clean.items()}
         try:
             return await remote(_OBSIDIAN_OPS[name], clean)
         except FileAccessError as e:
             return str(e)
+
+    @staticmethod
+    def _tidy_canvas(args: dict) -> dict:
+        """The canvas tool is loose: keep only well-formed items, and only the lists given."""
+        def objects(key: str) -> list:
+            return [x for x in args.get(key) or [] if isinstance(x, dict)]
+
+        clean = {"canvas": str(args.get("canvas") or "")}
+        clean["cards"] = [c if isinstance(c, dict) else {"text": str(c)}
+                          for c in args.get("cards") or []]
+        clean["links"] = objects("links")
+        edits = [c if isinstance(c, dict) else {"card": str(c)}
+                 for c in args.get("edit_cards") or []]
+        removals = [str(c.get("card") or c.get("id") or "") if isinstance(c, dict) else str(c)
+                    for c in args.get("remove_cards") or []]
+        for key, value in (("edit_cards", edits), ("remove_cards", [r for r in removals if r]),
+                           ("edit_links", objects("edit_links")),
+                           ("remove_links", objects("remove_links"))):
+            if value:
+                clean[key] = value
+        return clean
+
+    async def _propose_canvas(self, remote: RemoteFiles, args: dict) -> str:
+        """Removing cards or links deletes from Sir's board, so it goes on an approval card.
+        The terminal checks the change first (preview), so a card it can't find is said now."""
+        if self.approvals is None:
+            return "Removing things from a board needs the approval screen, which isn't here."
+        try:
+            plan = await remote("obsidian_canvas", {**args, "preview": True})
+        except FileAccessError as e:
+            return str(e)
+
+        async def action() -> str:
+            try:
+                return await remote("obsidian_canvas", args)
+            except FileAccessError as e:
+                return str(e)
+
+        title = f"Change the board {args['canvas']}"
+        card = self.approvals.propose(title, plan, action)
+        await self.show_card(card)
+        return f"An approval card is up: {plan} Nothing changes until it's approved."
 
     async def _run_email_tool(self, name: str, args: dict) -> str:
         m = self.mailbox

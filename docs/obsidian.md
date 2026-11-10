@@ -17,6 +17,14 @@ Tools (loaded on demand): `obsidian_open_note`, `obsidian_read`, `obsidian_write
 prepend, replace one section, create a note), `obsidian_show`, `obsidian_search`,
 `obsidian_canvas`. They need no approval card (they're Sir's own notes) but never replace a
 whole note or overwrite an existing one, and Jarvis asks before reorganising anything.
+
+`obsidian_canvas` also keeps a board up to date: it changes a card's text, colour, position or
+size, changes or removes a link's label, and removes cards (with their arrows) and links. Cards
+are named by id, exact text or a part of the text only one card has; links by the cards they
+join (or id). Everything is found before anything changes, so a missing or ambiguous card
+changes nothing and the candidates come back. Every other card, arrow and field in the board
+(groups, file and link cards) is kept as it was. Removals go on an approval card: the terminal
+first checks the change without saving (`preview`) so the card says exactly what will go.
 Obsidian's file recovery (Settings, Core plugins) keeps snapshots if an edit needs undoing.
 
 It works while Obsidian is open on that PC and its terminal is running. The `vault_*` tools

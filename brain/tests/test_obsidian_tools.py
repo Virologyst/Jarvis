@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from jarvis_brain.approvals import ApprovalGate  # noqa: E402
 from jarvis_brain.files import FileAccessError  # noqa: E402
 from jarvis_brain.persona import SYSTEM_PROMPT  # noqa: E402
 from jarvis_brain.selfupgrade import tool_schema_problems  # noqa: E402
@@ -54,6 +55,46 @@ def test_canvas_arguments_tidied_and_errors_said():
         "Obsidian isn't answering on this computer."
     assert "isn't reachable right now" in asyncio.run(ToolBox(None, no_card).run(
         "obsidian_open_note", {}))
+
+
+def test_canvas_removals_wait_for_approval():
+    calls, shown = [], []
+
+    async def show(card):
+        shown.append(card)
+
+    gate = ApprovalGate()
+    tools = ToolBox(None, show, approvals=gate, terminal_id=lambda: "craig-pc",
+                    obsidian_terminals=lambda: {"craig-pc": terminal("craig-pc", calls)})
+    said = asyncio.run(tools.run("obsidian_canvas", {
+        "canvas": "Board", "cards": [], "links": [], "edit_links": "junk",
+        "remove_cards": ["Old idea", {"card": "c1"}, ""], "remove_links": ["junk"]}))
+    assert "approval card is up" in said and "craig-pc did obsidian_canvas" in said
+    assert calls == [("craig-pc", "obsidian_canvas", {
+        "canvas": "Board", "cards": [], "links": [], "remove_cards": ["Old idea", "c1"],
+        "preview": True})]
+    assert len(shown) == 1 and shown[0].body == "craig-pc did obsidian_canvas"
+    assert asyncio.run(gate.decide(shown[0].card_id, "approve")) == "craig-pc did obsidian_canvas"
+    assert calls[-1][2] == {"canvas": "Board", "cards": [], "links": [],
+                            "remove_cards": ["Old idea", "c1"]}
+    # Edits that only change cards go straight through, like adding
+    asyncio.run(tools.run("obsidian_canvas", {"canvas": "Board", "edit_cards": [
+        {"card": "c1", "color": "red"}]}))
+    assert calls[-1][2] == {"canvas": "Board", "cards": [], "links": [],
+                            "edit_cards": [{"card": "c1", "color": "red"}]}
+    assert len(shown) == 1
+    # A card the terminal can't find is said straight away, with no approval card
+    failing = ToolBox(None, show, approvals=gate, terminal_id=lambda: "craig-pc",
+                      obsidian_terminals=lambda: {"craig-pc": terminal(
+                          "craig-pc", [], fail='No card matches "x".')})
+    assert asyncio.run(failing.run("obsidian_canvas", {"canvas": "Board",
+                                                       "remove_cards": ["x"]})) == \
+        'No card matches "x".'
+    assert len(shown) == 1
+    assert "approval screen" in asyncio.run(ToolBox(
+        None, show, terminal_id=lambda: "craig-pc",
+        obsidian_terminals=lambda: {"craig-pc": terminal("craig-pc", [])}).run(
+        "obsidian_canvas", {"canvas": "Board", "remove_links": [{"from": "a", "to": "b"}]}))
 
 
 def test_tools_load_on_demand_and_the_request_is_valid():
