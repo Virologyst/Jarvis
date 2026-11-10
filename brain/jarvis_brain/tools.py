@@ -541,13 +541,16 @@ TOOLS += [
     {
         "name": "email_important",
         "description": (
-            "Sir's important senders: Jarvis says aloud when one of them emails. List them, add "
-            "one or remove one. Use for 'tell me when Simon emails', 'Simon is important', "
-            "'stop telling me about the bank', 'who do you tell me about?'. Who: a name, an "
-            "address, a domain like @example.com, or a description like 'anyone from the bank'."),
+            "Who Jarvis announces new email from: Sir's important senders (or 'everyone') minus "
+            "exceptions. add/remove change the important list ('tell me when Simon emails', "
+            "'tell me about all my email' = add everyone); leave_out/include_again change the "
+            "exceptions ('don't tell me about Jira', 'stop telling me about newsletters'); list "
+            "says who ('who do you tell me about?'). Who: a name, an address, a domain like "
+            "@example.com, a word like Jira, or a description like 'anyone from the bank'."),
         "input_schema": _schema(
-            {"action": {"type": "string", "enum": ["list", "add", "remove"]},
-             "who": {"type": "string", "description": "Who to add or remove (not for list)."}},
+            {"action": {"type": "string",
+                        "enum": ["list", "add", "remove", "leave_out", "include_again"]},
+             "who": {"type": "string", "description": "Who (not for list)."}},
             ["action"]),
     },
 ]
@@ -835,6 +838,10 @@ class ToolBox:
                 return senders.add(who)
             if action == "remove":
                 return senders.remove(who)
+            if action == "leave_out":
+                return senders.exclude(who)
+            if action == "include_again":
+                return senders.unexclude(who)
             return senders.describe()
         return await m.search(str(args.get("query") or ""), count(8))
 

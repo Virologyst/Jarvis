@@ -17,7 +17,9 @@ Code: `brain/jarvis_brain/graph.py` (sign-in, Graph requests), `mail.py` (inbox,
 - **Who:** Sir's important list, `data/email/important.json`, changed by voice: "tell me when
   Simon emails", "stop telling me about the bank", "who do you tell me about?". An entry is a
   name, an address, a domain (`@example.com`) or a description ("anyone from the bank"; the
-  sorter judges those). Nobody is on it at first, so nothing is announced until Sir adds people.
+  sorter judges those), or `everyone`. Exceptions always win: "don't tell me about Jira"
+  leaves out every Jira notification, whoever triggered it (by name or address in code, and by
+  the sorter). Nobody is on the list at first, so nothing is announced until Sir adds people.
 - **How:** every minute (`JARVIS_EMAIL_CHECK_S`) the brain fetches inbox mail newer than the last
   it saw (`data/email/watch.json`; the first run starts from now, never the backlog). New unread
   mail goes to Claude Sonnet 5.5 (`JARVIS_EMAIL_SORT_MODEL`) in one request, which fills in a fixed
