@@ -16,6 +16,7 @@ dependencies = [
     "piper-tts>=1.3",
     "kokoro-onnx>=0.4",   # the default voice (natural British voices)
     "tzdata",             # timezone database for zoneinfo (Windows has none built in)
+    "msal>=1.28",         # Microsoft 365 sign-in for email (graph.py)
 ]
 
 [project.optional-dependencies]

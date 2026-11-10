@@ -15,11 +15,14 @@ import logging
 import os
 from collections.abc import Awaitable, Callable
 
+import aiohttp
 from jarvis_protocol import Card
 
 from . import clock
 from .files import FileAccessError, FileReader
 from .filewrite import FileWriter
+from .graph import GraphError
+from .mail import Mailbox
 from .tasks import TaskError, TaskStore
 from .themes import THEMES, describe
 from .vault import Vault, VaultError
@@ -501,6 +504,43 @@ TOOLS += [
 _VAULT_TOOLS = {"vault_projects", "vault_read", "vault_add_task", "vault_update_task",
                 "vault_update_project", "vault_new_project", "vault_add_point"}
 
+# --- Sir's email (mail.py, through Microsoft Graph) ---------------------------------------------
+# Reading only for now (reading one marks it read). Email text is untrusted outside content.
+TOOLS += [
+    {
+        "name": "email_inbox",
+        "description": (
+            "Sir's email inbox (Outlook, Microsoft 365): what's new or unread, newest first, with "
+            "sender, when, subject and the first line. Use for 'any new email?', 'what's in my "
+            "inbox?', 'have I got mail?'."),
+        "input_schema": _schema(
+            {"unread_only": {"type": "boolean",
+                             "description": "True for unread email only (usual), false for all."},
+             "count": {"type": "string", "description": "How many, 1 to 25 (default 10)."}},
+            ["unread_only"]),
+    },
+    {
+        "name": "email_read",
+        "description": (
+            "Read one email in full: its number from the last email_inbox or email_search list "
+            "(best), or words from the sender's name or subject, e.g. 'Simon' or 'the quote'. "
+            "Marks it read."),
+        "input_schema": _schema(
+            {"email": {"type": "string", "description": "Its number, or sender or subject words."}},
+            ["email"]),
+    },
+    {
+        "name": "email_search",
+        "description": ("Find emails in Sir's mailbox by words: sender, subject or what they say, "
+                        "e.g. 'invoice from Aptium' or 'fit-out quote'."),
+        "input_schema": _schema(
+            {"query": {"type": "string", "description": "Words to look for."},
+             "count": {"type": "string", "description": "How many, 1 to 25 (default 8)."}},
+            ["query"]),
+    },
+]
+_EMAIL_TOOLS = {"email_inbox", "email_read", "email_search"}
+
 # The API allows at most 20 strict tools per request (and 24 optional settings across them).
 # Strict mode guarantees a tool's input matches its schema, but the API compiles all strict
 # schemas in a request together and refuses when they're too big: at most 20 strict tools, 24
@@ -545,13 +585,15 @@ class ToolBox:
                  approvals=None,
                  terminal_id: Callable[[], str] | None = None,
                  file_terminals: Callable[[], dict[str, RemoteFiles]] | None = None,
-                 vault: Vault | None = None):
+                 vault: Vault | None = None,
+                 mailbox: Mailbox | None = None):
         self.upgrades = upgrades
         self.show_card = show_card
         self.current_theme = current_theme
         self.set_theme = set_theme
         self.tasks = tasks
         self.vault = vault
+        self.mailbox = mailbox
         # Who's talking, for "my tasks". Nothing can tell voices apart yet, so None (= Craig);
         # a voice-identification step can pass a callable returning the speaker's name.
         self.speaker = speaker or (lambda: None)
@@ -584,6 +626,16 @@ class ToolBox:
                 return self._run_task_tool(name, args)
             except TaskError as e:
                 return str(e)
+        if name in _EMAIL_TOOLS:
+            if self.mailbox is None:
+                return "Email isn't connected here."
+            try:
+                return await self._run_email_tool(name, args)
+            except GraphError as e:
+                return str(e)
+            except (OSError, aiohttp.ClientError, asyncio.TimeoutError) as e:
+                log.warning("email: %s", e)
+                return "I couldn't reach Microsoft's email service just now."
         if name in _VAULT_TOOLS:
             if self.vault is None:
                 return "The notes vault isn't connected here."
@@ -747,6 +799,22 @@ class ToolBox:
         if name == "add_person":
             return t.add_person(arg("name") or "")
         return t.list_people()
+
+    async def _run_email_tool(self, name: str, args: dict) -> str:
+        m = self.mailbox
+
+        def count(default: int) -> int:   # a loose tool: the value may not be a number
+            try:
+                return int(str(args.get("count") or default).strip())
+            except ValueError:
+                return default
+
+        if name == "email_inbox":
+            unread = args.get("unread_only")
+            return await m.inbox(True if unread is None else bool(unread), count(10))
+        if name == "email_read":
+            return await m.read(str(args.get("email") or ""))
+        return await m.search(str(args.get("query") or ""), count(8))
 
     def _run_vault_tool(self, name: str, args: dict) -> str:
         v = self.vault

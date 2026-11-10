@@ -43,6 +43,8 @@ from .selfupgrade import UpgradeManager, take_rollback_note
 from .sentences import SentenceSplitter
 from .stt import Transcriber
 from .themes import DEFAULT_THEME, THEMES, ThemeStore, resolve
+from .graph import Graph, GraphAuth
+from .mail import Mailbox
 from .tasks import TaskStore
 from .vault import Vault
 from .tools import REQUEST_TOOLS, ToolBox
@@ -86,6 +88,11 @@ class Brain:
         self.tasks = TaskStore(REPO_ROOT / "data" / "tasks.json")   # shared by every terminal
         self.vault = Vault.from_env()   # Sir's Obsidian notes (JARVIS_VAULT), if set
         log.info("notes vault: %s", self.vault.root or "not set (JARVIS_VAULT)")
+        # Sir's Microsoft 365 mailbox (graph.py); tools say so if it isn't set up or signed in
+        mail_auth = GraphAuth.from_env()
+        self.mailbox = Mailbox(Graph(mail_auth))
+        log.info("email: %s", "configured" if mail_auth.configured
+                 else "not set up (JARVIS_GRAPH_CLIENT_ID, JARVIS_GRAPH_TENANT_ID)")
         self.reminders = ReminderService(self.tasks, self.deliver_reminder)
         self._reminder_loop: asyncio.Task | None = None
         # Said once to the first terminal that connects: (card title, what to say)
@@ -151,7 +158,8 @@ class TerminalSession:
                         set_theme=self.set_theme, tasks=brain.tasks, approvals=brain.approvals,
                         terminal_id=lambda: self.terminal_id,
                         file_terminals=lambda: brain.file_terminals(),
-                        vault=getattr(brain, "vault", None))
+                        vault=getattr(brain, "vault", None),
+                        mailbox=getattr(brain, "mailbox", None))
         self.conversation = Conversation(brain.client, s.model, s.effort, s.idle_reset_minutes,
                                          tools=REQUEST_TOOLS, run_tool=tools.run)
         self.listening = False
