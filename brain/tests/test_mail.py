@@ -183,7 +183,7 @@ def test_email_tools_through_the_toolbox():
 
 def test_email_tools_load_on_demand_and_are_described():
     email = {t["name"]: t for t in REQUEST_TOOLS if t.get("name", "").startswith("email_")}
-    assert set(email) == {"email_inbox", "email_read", "email_search"}
+    assert set(email) == {"email_inbox", "email_read", "email_search", "email_important"}
     assert all(t["defer_loading"] and not t["strict"] for t in email.values())
     for name in email:
         assert name in SYSTEM_PROMPT

@@ -538,8 +538,20 @@ TOOLS += [
              "count": {"type": "string", "description": "How many, 1 to 25 (default 8)."}},
             ["query"]),
     },
+    {
+        "name": "email_important",
+        "description": (
+            "Sir's important senders: Jarvis says aloud when one of them emails. List them, add "
+            "one or remove one. Use for 'tell me when Simon emails', 'Simon is important', "
+            "'stop telling me about the bank', 'who do you tell me about?'. Who: a name, an "
+            "address, a domain like @example.com, or a description like 'anyone from the bank'."),
+        "input_schema": _schema(
+            {"action": {"type": "string", "enum": ["list", "add", "remove"]},
+             "who": {"type": "string", "description": "Who to add or remove (not for list)."}},
+            ["action"]),
+    },
 ]
-_EMAIL_TOOLS = {"email_inbox", "email_read", "email_search"}
+_EMAIL_TOOLS = {"email_inbox", "email_read", "email_search", "email_important"}
 
 # The API allows at most 20 strict tools per request (and 24 optional settings across them).
 # Strict mode guarantees a tool's input matches its schema, but the API compiles all strict
@@ -814,6 +826,16 @@ class ToolBox:
             return await m.inbox(True if unread is None else bool(unread), count(10))
         if name == "email_read":
             return await m.read(str(args.get("email") or ""))
+        if name == "email_important":
+            senders = getattr(m, "important", None)
+            if senders is None:
+                return "Email announcements aren't set up here."
+            action, who = str(args.get("action") or "list"), str(args.get("who") or "")
+            if action == "add":
+                return senders.add(who)
+            if action == "remove":
+                return senders.remove(who)
+            return senders.describe()
         return await m.search(str(args.get("query") or ""), count(8))
 
     def _run_vault_tool(self, name: str, args: dict) -> str:

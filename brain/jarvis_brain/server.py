@@ -45,6 +45,7 @@ from .stt import Transcriber
 from .themes import DEFAULT_THEME, THEMES, ThemeStore, resolve
 from .graph import Graph, GraphAuth
 from .mail import Mailbox
+from .mail_watch import ImportantSenders, MailWatcher, Sorter, parse_quiet
 from .tasks import TaskStore
 from .vault import Vault
 from .tools import REQUEST_TOOLS, ToolBox
@@ -93,6 +94,22 @@ class Brain:
         self.mailbox = Mailbox(Graph(mail_auth))
         log.info("email: %s", "configured" if mail_auth.configured
                  else "not set up (JARVIS_GRAPH_CLIENT_ID, JARVIS_GRAPH_TENANT_ID)")
+        # Step 2: watch the inbox and say when someone important writes (mail_watch.py)
+        self.mailbox.important = ImportantSenders(REPO_ROOT / "data" / "email" / "important.json")
+        self.mail_watch: MailWatcher | None = None
+        if mail_auth.configured and os.environ.get("JARVIS_EMAIL_WATCH", "on").lower() not in {
+                "0", "off", "false", "no"}:
+            self.mail_watch = MailWatcher(
+                self.mailbox.graph,
+                Sorter(self.client, os.environ.get("JARVIS_EMAIL_SORT_MODEL") or "claude-sonnet-5-5"),
+                self.mailbox.important, self.deliver_reminder,
+                REPO_ROOT / "data" / "email" / "watch.json",
+                every_s=float(os.environ.get("JARVIS_EMAIL_CHECK_S", "60")),
+                announce_urgent=os.environ.get("JARVIS_EMAIL_ANNOUNCE_URGENT", "").lower()
+                in {"1", "on", "true", "yes"},
+                quiet=parse_quiet(os.environ.get("JARVIS_EMAIL_QUIET", "22:00-07:00")),
+                on_announced=self.mailbox.remember_list)
+        self._mail_loop: asyncio.Task | None = None
         self.reminders = ReminderService(self.tasks, self.deliver_reminder)
         self._reminder_loop: asyncio.Task | None = None
         # Said once to the first terminal that connects: (card title, what to say)
@@ -105,16 +122,19 @@ class Brain:
         if resumed and not self.notice:
             self.notice = ("Self-upgrade", resumed[0].upper() + resumed[1:])
         self._reminder_loop = asyncio.create_task(self.reminders.run())
+        if self.mail_watch:
+            self._mail_loop = asyncio.create_task(self.mail_watch.run())
 
     async def on_cleanup(self, app: web.Application) -> None:
-        if self._reminder_loop:
-            self._reminder_loop.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._reminder_loop
+        for loop in (self._reminder_loop, self._mail_loop):
+            if loop:
+                loop.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await loop
 
     async def deliver_reminder(self, due) -> bool:
-        """Say a task reminder on every terminal, each as soon as it's free. False (try again
-        later) if no terminal is connected to hear it."""
+        """Say a task reminder (or an email announcement) on every terminal, each as soon as
+        it's free. False (try again later) if no terminal is connected to hear it."""
         if not self.sessions:
             return False
         for s in list(self.sessions):

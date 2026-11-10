@@ -55,6 +55,11 @@ class Mailbox:
         self.graph = graph
         self._clock = now or (lambda: datetime.now(ZoneInfo(HOME_ZONE)))
         self._listed: list[dict] = []    # the last list Jarvis read out, for "number 2"
+        self.important = None            # ImportantSenders (mail_watch.py), set by the brain
+
+    def remember_list(self, messages: list[dict]) -> None:
+        """Emails Jarvis just named unprompted, so "read the first one" works."""
+        self._listed = list(messages)
 
     # Speaking
 

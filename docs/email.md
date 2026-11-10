@@ -4,12 +4,32 @@ Jarvis reads Sir's Microsoft 365 (Outlook) mailbox through Microsoft Graph. Buil
 
 1. **Connect and read** (done): "any new email?", "read me the one from Simon", "find the
    email about the quote". Reading one marks it read.
-2. **Watch and announce** (next): a background agent on the brain PC sorts new mail with Claude
-   Sonnet 5.5 and Jarvis says when someone important writes, or something is urgent.
-3. **Draft and send**: replies saved as Outlook drafts; nothing is sent until Sir approves a card.
+2. **Watch and announce** (done): the brain checks the inbox every minute, sorts new mail with
+   Claude Sonnet 5.5, and Jarvis says when someone on Sir's important list writes.
+3. **Draft and send** (next): replies saved as Outlook drafts; nothing is sent until Sir approves a card.
 
 Code: `brain/jarvis_brain/graph.py` (sign-in, Graph requests), `mail.py` (inbox, read, search),
-tools `email_inbox`, `email_read`, `email_search` in `tools.py` (loaded on demand).
+`mail_watch.py` (watching and announcing), tools `email_inbox`, `email_read`, `email_search`,
+`email_important` in `tools.py` (loaded on demand).
+
+## Announcements
+
+- **Who:** Sir's important list, `data/email/important.json`, changed by voice: "tell me when
+  Simon emails", "stop telling me about the bank", "who do you tell me about?". An entry is a
+  name, an address, a domain (`@example.com`) or a description ("anyone from the bank"; the
+  sorter judges those). Nobody is on it at first, so nothing is announced until Sir adds people.
+- **How:** every minute (`JARVIS_EMAIL_CHECK_S`) the brain fetches inbox mail newer than the last
+  it saw (`data/email/watch.json`; the first run starts from now, never the backlog). New unread
+  mail goes to Claude Sonnet 5.5 (`JARVIS_EMAIL_SORT_MODEL`) in one request, which fills in a fixed
+  form per email: kind (person, notification, newsletter, spam), important sender, urgent, and a
+  one-line summary. Mail from the list (by the sorter, or by name, address or domain in code) is
+  said on every terminal once it's quiet, like a task reminder; "read it" afterwards works.
+- **Urgent mail from anyone else** is announced too only with `JARVIS_EMAIL_ANNOUNCE_URGENT=on`.
+  Spam never is.
+- **Quiet hours** (`JARVIS_EMAIL_QUIET`, default `22:00-07:00`, `off` for none): announcements
+  wait until they end, and while no terminal is connected. Anything held over 12 hours is dropped.
+- `JARVIS_EMAIL_WATCH=off` turns watching off; the email tools still work.
+- **Cost:** only new unread mail is sorted, a batch per minute at most, on the small model.
 
 ## Safety
 
