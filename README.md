@@ -46,7 +46,8 @@ only), `--list-devices`, `--mic <name>` / `--speaker <name>` (for this run), `-v
 
 To keep a Windows PC's terminal running whenever you're signed in (no window; restarted if it
 stops; output in `logs\terminal.log`), point it at the brain in `.env` (`JARVIS_BRAIN_URL`) and run
-`powershell -ExecutionPolicy Bypass -File scripts\install-terminal.ps1` (`-Uninstall` removes it).
+`powershell -ExecutionPolicy Bypass -File scripts\install-terminal.ps1` (`-Uninstall` removes it). It also opens the screen in its own full-screen Edge window (F11 leaves full screen;
+`JARVIS_SCREEN=window` or `off` in `.env`).
 
 ## Set up the brain PC (starts at boot, no login needed)
 
