@@ -49,6 +49,7 @@ PROTECTED = (
     "brain/jarvis_brain/approvals.py",
     "brain/jarvis_brain/selfupgrade.py",
     "brain/jarvis_brain/supervisor.py",
+    "brain/jarvis_brain/publish.py",       # what gets pushed to GitHub, and where
     "brain/tests/test_selfupgrade.py",
     ".env",
     ".env.example",

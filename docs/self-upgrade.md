@@ -83,3 +83,27 @@ README). By hand, for testing:
 Claude Code must be installed and signed in for the account the brain runs as
 (`claude` once, then `/login`). Upgrades to `terminal/`, `ui/` or `protocol/` also need the
 terminals updated (`git pull` there); Jarvis mentions it when that's the case.
+
+## Getting upgrades onto GitHub
+
+Upgrades are committed on the brain PC, so the brain pushes them itself on every start-up
+(which includes the restart after an upgrade or a roll-back), in `brain/jarvis_brain/publish.py`
+(protected: upgrades can't change it):
+
+- its HEAD to **`jarvis/brain-pc`**, always (forced): a mirror of what the brain is running;
+- its HEAD to **`eye`**, only as a fast-forward. If GitHub's `eye` has work the brain hasn't got
+  (or a roll-back moved the brain back), that push is refused and the log says so: merge
+  `jarvis/brain-pc` into `eye` on the dev PC.
+
+It pushes through the `github` remote (`JARVIS_GIT_REMOTE`) with a **deploy key** that can write
+to this repository only. Set up once on the brain PC, as the brain's account:
+
+1. `ssh-keygen -t ed25519 -f C:\Users\Jarvis\.ssh\jarvis_github` (no passphrase).
+2. GitHub: the repository's Settings, Deploy keys, Add deploy key: paste
+   `jarvis_github.pub`, tick **Allow write access**.
+3. In the repo: `git remote add github git@github.com:Virologyst/Jarvis.git` and
+   `git config core.sshCommand "ssh -i C:/Users/Jarvis/.ssh/jarvis_github -o IdentitiesOnly=yes -o UserKnownHostsFile=C:/Users/Jarvis/.ssh/known_hosts -o StrictHostKeyChecking=yes -o BatchMode=yes"`,
+   with GitHub's published host key in that `known_hosts`.
+
+`logs\brain.log` shows `github: pushed ...` about 20 seconds after each start. Without the remote
+it says so and does nothing else. On the dev PC, `git pull` brings the upgrades in before working.

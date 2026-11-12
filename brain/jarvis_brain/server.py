@@ -41,6 +41,7 @@ from .files import FileAccessError
 from .listenmode import addressed, is_noise, listen_mode_command
 from .llm import Conversation
 from .reminders import ReminderService
+from .publish import publish_later
 from .selfupgrade import UpgradeManager, take_rollback_note
 from .sentences import SentenceSplitter
 from .stt import Transcriber
@@ -135,9 +136,11 @@ class Brain:
         self._reminder_loop = asyncio.create_task(self.reminders.run())
         if self.mail_watch:
             self._mail_loop = asyncio.create_task(self.mail_watch.run())
+        # Self-upgrades are committed here; get them onto GitHub (publish.py)
+        self._publish = asyncio.create_task(publish_later(REPO_ROOT))
 
     async def on_cleanup(self, app: web.Application) -> None:
-        for loop in (self._reminder_loop, self._mail_loop):
+        for loop in (self._reminder_loop, self._mail_loop, getattr(self, "_publish", None)):
             if loop:
                 loop.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
