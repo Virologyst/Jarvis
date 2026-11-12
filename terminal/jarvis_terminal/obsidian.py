@@ -6,7 +6,9 @@ JARVIS_OBSIDIAN_KEY). Going through Obsidian, rather than writing files, means J
 which note is open, open notes on screen, and edit a note Sir has open without clobbering it.
 
 Ops (args): obsidian_active, obsidian_read (note, heading), obsidian_edit (note, action, heading,
-text), obsidian_open (note), obsidian_search (query), obsidian_canvas (canvas, cards, links,
+text), obsidian_project (note, progress, status, next, log_entry: a project note's properties,
+its coloured progress bar and log), obsidian_open (note), obsidian_search (query),
+obsidian_canvas (canvas, cards, links,
 edit_cards, remove_cards, edit_links, remove_links, preview).
 A note is a vault path ("Projects/J.A.R.V.I.S.md"), a name ("J.A.R.V.I.S"), or "" for the note
 open now. Headings are "Parent > Child". Everything answers (ok, text) for Jarvis to use.
@@ -24,8 +26,12 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import date
+
+from jarvis_protocol.progress import refresh_bar
 
 log = logging.getLogger(__name__)
+STATUSES = ("idea", "planned", "active", "on hold", "done")
 
 DEFAULT_URL = "https://127.0.0.1:27124"
 TIMEOUT_S = 8.0
@@ -94,6 +100,75 @@ def insert(text: str, new: str, path: list[str], at_top: bool) -> str | None:
     added = new.strip("\n").splitlines()
     out = lines[:spot] + added + lines[spot:]
     return "\n".join(out) + ("\n" if text.endswith("\n") or not text else "")
+
+
+def _front(text: str) -> tuple[str, str] | None:
+    m = re.match(r"^---\n(.*?\n)---\n", text, re.S)
+    return (m.group(1), text[m.end():]) if m else None
+
+
+def _get_prop(front: str, key: str) -> str:
+    m = re.search(rf"^{re.escape(key)}:[ \t]*(.*)$", front, re.M)
+    return m.group(1).strip().strip("'\"") if m else ""
+
+
+def _set_prop(front: str, key: str, value: str) -> str:
+    line = f"{key}: {value}".rstrip()
+    if re.search(rf"^{re.escape(key)}:", front, re.M):
+        return re.sub(rf"^{re.escape(key)}:.*$", lambda _: line, front, count=1, flags=re.M)
+    return front + line + "\n"
+
+
+def project_update(text: str, progress="", status="", next_step="", log_entry="",
+                   today: str = "") -> tuple[str, list[str]]:
+    """The note with its project properties changed, the bar redrawn and the changes logged
+    (newest first, under the Log heading). Returns (text, what changed)."""
+    parts = _front(text.replace("\r\n", "\n"))
+    if parts is None:
+        raise ObsidianError("That note has no project properties at the top.")
+    front, body = parts
+    said, entries = [], []
+    if str(progress).strip():
+        m = re.search(r"\d+", str(progress))
+        if not m:
+            raise ObsidianError("Progress is a percentage, 0 to 100.")
+        value, old = str(max(0, min(100, int(m.group())))), _get_prop(front, "progress") or "0"
+        if value != old:
+            front = _set_prop(front, "progress", value)
+            said.append(f"progress {value}%")
+            entries.append(f"Progress: {old}% → {value}%")
+    if status.strip():
+        want = status.strip().lower().replace("_", " ")
+        want = {"hold": "on hold", "paused": "on hold", "finished": "done", "complete": "done",
+                "completed": "done", "in progress": "active"}.get(want, want)
+        if want not in STATUSES:
+            raise ObsidianError(f"Status can be {', '.join(STATUSES)}.")
+        if want != _get_prop(front, "status"):
+            entries.append(f"Status: {_get_prop(front, 'status') or 'none'} → {want}")
+            front = _set_prop(front, "status", want)
+            said.append(f"status {want}")
+    nxt = " ".join(str(next_step).split())
+    if nxt and nxt != _get_prop(front, "next"):
+        front = _set_prop(front, "next", nxt)
+        said.append(f"next step '{nxt}'")
+        entries.append(f"Next step: {nxt}")
+    entry = " ".join(str(log_entry).split())
+    if entry:
+        entries.append(entry)
+        said.append("noted it in the log")
+    if not said:
+        return text, []
+    today = today or date.today().isoformat()
+    front = _set_prop(front, "updated", today)
+    body = refresh_bar(body, _get_prop(front, "progress") or 0)
+    lines = body.split("\n")
+    at = next((i for i, ln in enumerate(lines) if re.match(r"^#{1,6}\s+Log\s*$", ln)), None)
+    new = [f"- {today}: {e}" for e in entries]
+    if at is None:
+        lines = [*lines[:len(lines) - (1 if lines and not lines[-1] else 0)], "", "## Log", *new, ""]
+    else:
+        lines[at + 1:at + 1] = new
+    return "---\n" + front + "---\n" + "\n".join(lines), said
 
 
 def headings(text: str) -> list[str]:
@@ -510,6 +585,28 @@ class ObsidianBridge:
             "Content-Type": "text/markdown", "Operation": action, "Target-Type": "heading",
             "Target": urllib.parse.quote("::".join(parts)), "Target-Delimiter": "::",
             "Create-Target-If-Missing": "true"})
+
+    def op_project(self, note: str = "", progress: str = "", status: str = "", next: str = "",
+                   log_entry: str = "") -> str:
+        """Update a project note's progress (and its coloured bar), status, next step and log,
+        like the brain's vault_update_project, live through Obsidian; saved only if the note
+        hasn't changed since it was read."""
+        api, path = self._target(note)
+        for attempt in range(2):
+            current, info = self._exchange("GET", api, headers={"Accept": "text/markdown"})
+            updated, said = project_update(current, progress, status, next, log_entry,
+                                           date.today().isoformat())
+            if not said:
+                return f"Nothing changed in {path}."
+            tag = info.get("etag")
+            try:
+                self._call("PUT", api, updated, {"Content-Type": "text/markdown",
+                                                 **({"If-Match": tag} if tag else {})})
+                return f"Updated {path}: {', '.join(said)}."
+            except ObsidianError as e:
+                if "(412)" not in str(e) or attempt:
+                    raise
+        return f"Updated {path}."
 
     def op_open(self, note: str) -> str:
         path = self.resolve(note)

@@ -33,6 +33,7 @@ from jarvis_protocol import (
     UserInput, WakeCheck, WakeResult, Welcome, decode, encode,
 )
 
+from .answerstyle import DETAILED, DETAILED_NOTE, AnswerStyles, style_command
 from .approvals import ApprovalGate
 from .config import REPO_ROOT, Settings
 from .emotions import TagStripper, parse_sentence
@@ -87,6 +88,8 @@ class Brain:
         self.sessions: set[TerminalSession] = set()
         self.upgrades = UpgradeManager(REPO_ROOT, self.approvals, self.announce)
         self.themes = ThemeStore(REPO_ROOT / "data" / "themes.json")
+        # Pointed answers: brief (default) or detailed, per screen (answerstyle.py)
+        self.answer_styles = AnswerStyles(REPO_ROOT / "data" / "answer-style.json")
         self.tasks = TaskStore(REPO_ROOT / "data" / "tasks.json")   # shared by every terminal
         self.vault = Vault.from_env()   # Sir's Obsidian notes (JARVIS_VAULT), if set
         log.info("notes vault: %s", self.vault.root or "not set (JARVIS_VAULT)")
@@ -463,7 +466,7 @@ class TerminalSession:
                 self.conversation.add_aside(text, ack)
                 await self._speak_text(ack)
                 return
-            await self._speak_stream(self.conversation.reply(text))
+            await self._speak_stream(self.conversation.reply(text + self._style_note()))
         await self._guarded(spoken())
 
     async def _run_typed_turn(self, msg: UserInput) -> None:
@@ -480,7 +483,7 @@ class TerminalSession:
             content = [{"type": "image", "source": {"type": "base64", "media_type": i["media_type"],
                                                     "data": i["data"]}} for i in images]
             content.append({"type": "text", "text": (text or "Have a look at this.") +
-                            "\n\n(Typed on the screen, not spoken.)"})
+                            "\n\n(Typed on the screen, not spoken.)" + self._style_note()})
             await self._speak_stream(self.conversation.reply(content))
         await self._guarded(typed())
 
@@ -491,6 +494,11 @@ class TerminalSession:
         mode = listen_mode_command(text)
         if mode is not None:
             await self._speak_text(await self.set_listen_mode(mode))
+            return True
+        style = style_command(text)
+        if style is not None and hasattr(self.brain, "answer_styles"):
+            log.info("[%s] answer style: %s", self.terminal_id, style)
+            await self._speak_text(self.brain.answer_styles.set(self.terminal_id, style))
             return True
         parsed = parse_voice_decision(text)
         if not parsed:
@@ -511,6 +519,11 @@ class TerminalSession:
         result = await self.brain.decide(card.card_id, decision)
         await self._speak_text(result)
         return True
+
+    def _style_note(self) -> str:
+        """Asks for fuller answers on a screen switched to detailed; brief is the default."""
+        styles = getattr(self.brain, "answer_styles", None)
+        return DETAILED_NOTE if styles and styles.get(self.terminal_id) == DETAILED else ""
 
     async def _guarded(self, turn) -> None:
         """Run a turn, turning failures into something Jarvis says instead of a crash."""

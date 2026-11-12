@@ -643,6 +643,23 @@ TOOLS += [
             ["action", "text"]),
     },
     {
+        "name": "obsidian_project",
+        "description": (
+            "Update a project note live in Obsidian: its progress percentage (the coloured bar "
+            "redraws itself), status (idea, planned, active, on hold, done), next step, and a "
+            "dated line in its log (newest first). Use when Sir reports progress or a decision, "
+            "or after ticking off tasks when the percentage looks out of date. Only what's given "
+            "changes; every change is logged."),
+        "input_schema": _schema(
+            {"note": _NOTE,
+             "progress": {"type": "string", "description": "0 to 100."},
+             "status": {"type": "string",
+                        "enum": ["idea", "planned", "active", "on hold", "done"]},
+             "next": {"type": "string", "description": "The next step, one line."},
+             "log_entry": {"type": "string", "description": "What happened, one line."}},
+            []),
+    },
+    {
         "name": "obsidian_show",
         "description": "Open a note on Sir's screen in Obsidian ('show me the J.A.R.V.I.S notes').",
         "input_schema": _schema({"note": {"type": "string",
@@ -703,7 +720,8 @@ TOOLS += [
 ]
 # tool name -> the terminal's op
 _OBSIDIAN_OPS = {"obsidian_open_note": "obsidian_active", "obsidian_read": "obsidian_read",
-                 "obsidian_write": "obsidian_edit", "obsidian_show": "obsidian_open",
+                 "obsidian_write": "obsidian_edit", "obsidian_project": "obsidian_project",
+                 "obsidian_show": "obsidian_open",
                  "obsidian_search": "obsidian_search", "obsidian_canvas": "obsidian_canvas"}
 
 # --- Coding: Claude Code in Sir's project folders, on the PC whose terminal runs the coder ------

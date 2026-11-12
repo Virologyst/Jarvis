@@ -100,7 +100,7 @@ def test_canvas_removals_wait_for_approval():
 def test_tools_load_on_demand_and_the_request_is_valid():
     obsidian = [t for t in REQUEST_TOOLS if t.get("name", "").startswith("obsidian_")]
     assert {t["name"] for t in obsidian} == {"obsidian_open_note", "obsidian_read",
-                                             "obsidian_write", "obsidian_show",
+                                             "obsidian_write", "obsidian_show", "obsidian_project",
                                              "obsidian_search", "obsidian_canvas"}
     assert all(t["defer_loading"] and not t["strict"] for t in obsidian)
     assert all(t["name"] in SYSTEM_PROMPT for t in obsidian if t["name"] != "obsidian_read")

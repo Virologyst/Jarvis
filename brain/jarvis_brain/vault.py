@@ -25,6 +25,8 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from jarvis_protocol.progress import refresh_bar
+
 from .clock import HOME_ZONE
 
 log = logging.getLogger(__name__)
@@ -144,6 +146,13 @@ def set_property(lines: list[str], key: str, value: str) -> list[str]:
                 j += 1
             return lines[:i] + [new] + lines[j:]
     return lines[:end] + [new] + lines[end:]
+
+
+def _redraw_bar(lines: list[str]) -> list[str]:
+    """Keep the note's coloured progress bar (if it has one) in step with its progress."""
+    text = "\n".join(lines)
+    redrawn = refresh_bar(text, read_properties(lines).get("progress") or 0)
+    return redrawn.split("\n") if redrawn != text else lines
 
 
 # --- Headings, tasks and bullets -----------------------------------------------------------------
@@ -466,6 +475,7 @@ class Vault:
 
     def _save_project(self, path: Path, lines: list[str], newline: str, entries: list[str]) -> None:
         lines = set_property(lines, "updated", self._today())
+        lines = _redraw_bar(lines)
         for entry in reversed(entries):      # newest first, in the order they were made
             lines = self._add_log(lines, entry)
         self._write(path, lines, newline)
@@ -620,6 +630,9 @@ class Vault:
         today = self._today()
         text = text.replace("{{title}}", name).replace("{{date}}", today) \
             .replace("{{time}}", self._clock().strftime("%H:%M"))
+        # The template's "how to fill this in" block is for whoever writes the note by hand
+        text = re.sub(r"(?ms)^%%\s*\nHOW TO FILL THIS IN.*?^%%\s*\n", "", text, count=1)
+        text = text.replace(" · code: <repo link or folder path>", "")
         lines = text.replace("\r\n", "\n").rstrip("\n").split("\n")
         about = _one_line(about)
         if about:
@@ -638,6 +651,7 @@ class Vault:
             lines = set_property(lines, "status", want)
         if not read_properties(lines).get("type"):
             lines = set_property(lines, "type", "project")
+        lines = _redraw_bar(lines)
         path.parent.mkdir(parents=True, exist_ok=True)
         self._write(path, lines)
         linked = self._link_from_map(name, about)
