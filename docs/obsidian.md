@@ -14,9 +14,17 @@ Jarvis's requests to Obsidian's **Local REST API** plugin there, on 127.0.0.1 on
 in the note even while Sir has it open.
 
 Tools (loaded on demand): `obsidian_open_note`, `obsidian_read`, `obsidian_write` (append,
-prepend, replace one section, create a note), `obsidian_show`, `obsidian_search`,
-`obsidian_canvas`. They need no approval card (they're Sir's own notes) but never replace a
-whole note or overwrite an existing one, and Jarvis asks before reorganising anything.
+prepend, replace one section, create a note), `obsidian_delete`, `obsidian_show`,
+`obsidian_search`, `obsidian_canvas`. They need no approval card (they're Sir's own notes) but
+never replace a whole note or overwrite an existing one, and Jarvis asks before reorganising
+anything.
+
+`obsidian_delete` removes an exact passage, or a heading with its whole section (a `Log` heading
+under it is left alone), only when Sir asks. It goes on an approval card: the terminal first
+finds it without saving (`preview`), so a passage that's missing or there more than once is said
+straight away with the copies (`which`, 1 = first in the note, picks one). Once approved, the
+brain sends the same request with that preview as `expect`; the terminal deletes only if the
+note still gives exactly the same, and saves only if Sir hasn't typed since it read (If-Match).
 
 `obsidian_canvas` also keeps a board up to date: it changes a card's text, colour, position or
 size, changes or removes a link's label, and removes cards (with their arrows) and links. Cards

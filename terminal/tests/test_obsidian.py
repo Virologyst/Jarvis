@@ -9,7 +9,8 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from jarvis_terminal.obsidian import ObsidianBridge, section, split_heading  # noqa: E402
+from jarvis_terminal.obsidian import (ObsidianBridge, ObsidianError, cut, section,  # noqa: E402
+                                      split_heading)
 
 NOTE = "---\nstatus: active\n---\n# J.A.R.V.I.S\nIntro\n## Ideas\n- voice\n## Log\n- started\n"
 
@@ -336,3 +337,59 @@ def test_heading_helpers():
     assert split_heading("Ideas > Pricing") == ["Ideas", "Pricing"]
     assert split_heading("## Ideas::Pricing") == ["Ideas", "Pricing"]
     assert section("# A\n## B\nx\n# C\n## B\ny", ["C", "B"]) == "## B\ny"
+
+
+MINESWEEPER = ("---\ntype: project\n---\n# Craig's tasks\n- [ ] flags\n\t- [ ] sprite\n"
+               "## Notes\n- grid\n# Craig's tasks\n- [ ] moved by mistake\n# Log\n- started\n")
+MINE = "Projects/Project Minesweeper.md"
+
+
+def test_cut_a_passage_or_a_heading_and_never_guess():
+    kept, gone, label = cut(MINESWEEPER, path=["Craig's tasks"], which=2)
+    assert gone == "# Craig's tasks\n- [ ] moved by mistake" and "heading Craig's tasks" in label
+    assert kept == MINESWEEPER.replace("# Craig's tasks\n- [ ] moved by mistake\n", "")
+    kept, gone, label = cut(MINESWEEPER, path=["Craig's tasks"], which=1)
+    assert gone == "# Craig's tasks\n- [ ] flags\n\t- [ ] sprite\n## Notes\n- grid"
+    assert label.endswith("its section, with Notes under it")
+    # A log nested under a stray heading stays
+    assert cut("# Stray\n- x\n## Log\n- y\n", path=["Stray"])[0] == "## Log\n- y\n"
+    with pytest.raises(ObsidianError, match="2 times.*1: line 4; 2: line 9"):
+        cut(MINESWEEPER, path=["Craig's tasks"])
+    with pytest.raises(ObsidianError, match="only there 2 times"):
+        cut(MINESWEEPER, path=["Craig's tasks"], which=3)
+    with pytest.raises(ObsidianError, match="no heading Nope.*headings: Craig's tasks"):
+        cut(MINESWEEPER, path=["Nope"])
+    assert cut(MINESWEEPER, path=["Craig's tasks", "Notes"])[1] == "## Notes\n- grid"
+    # An exact passage: whole lines go with their line break, part of a line just the words
+    kept, gone, label = cut(MINESWEEPER, "\t- [ ] sprite\n")
+    assert kept == MINESWEEPER.replace("\t- [ ] sprite\n", "") and label == "'- [ ] sprite'"
+    assert cut("# A\n- big red dog\n", "red ")[0] == "# A\n- big dog\n"
+    assert cut("a\r\nb\r\nc\r\n", "b")[0] == "a\r\nc\r\n"
+    with pytest.raises(ObsidianError, match="can't find those exact words"):
+        cut(MINESWEEPER, "type: project")          # properties are left alone
+    with pytest.raises(ObsidianError, match="2 times"):
+        cut(MINESWEEPER, "Craig's tasks")
+    with pytest.raises(ObsidianError, match="exact words"):
+        cut(MINESWEEPER, "  \n")
+
+
+def test_delete_previews_then_deletes_only_what_the_card_showed():
+    b, fake = bridge(files={MINE: MINESWEEPER})
+    args = {"note": "Project Minesweeper", "heading": "Craig's tasks", "which": 2}
+    ok, plan = b.handle("obsidian_delete", {**args, "preview": True})
+    assert ok and plan == ("Delete the heading Craig's tasks and its section from "
+                           f"{MINE}:\n# Craig's tasks\n- [ ] moved by mistake")
+    assert fake.files[MINE] == MINESWEEPER                          # nothing saved
+    ok, text = b.handle("obsidian_delete", args)                    # no card's say-so
+    assert not ok and "changed since" in text
+    fake.files[MINE] = MINESWEEPER.replace("mistake", "mistake\n- [ ] new")
+    ok, text = b.handle("obsidian_delete", {**args, "expect": plan})  # Sir added a line since
+    assert not ok and "changed since" in text and "- [ ] new" in fake.files[MINE]
+    fake.files[MINE] = MINESWEEPER
+    ok, text = b.handle("obsidian_delete", {**args, "expect": plan})
+    assert ok and text.startswith("Deleted the heading Craig's tasks")
+    assert fake.files[MINE].count("# Craig's tasks") == 1 and "by mistake" not in fake.files[MINE]
+    assert "if-match" in [c for c in fake.calls if c[0] == "PUT"][-1][2]
+    ok, text = b.handle("obsidian_delete", {"note": "Project Minesweeper", "text": "nowhere",
+                                            "preview": True})
+    assert not ok and "can't find" in text

@@ -9,8 +9,9 @@ Success Map so Sir and Jarvis follow the same ones:
 - ## Log: one line per change, newest first. Jarvis adds a line for every change it makes.
 
 Sir edits these notes in Obsidian at the same time, so every call reads the file fresh, changes
-only the lines it must, and writes the file back in one step. Nothing here deletes a note or a
-line: tasks are ticked off, never removed. Only notes found inside the vault are read or written.
+only the lines it must, and writes the file back in one step. Deleting a task or a passage (only
+when Sir asks) is planned here and made only after an approval card, and is logged like any other
+change; nothing deletes a whole note. Only notes found inside the vault are read or written.
 Results are worded for Jarvis to say aloud; bracketed parts are for Jarvis.
 """
 
@@ -271,6 +272,51 @@ def _match_one(candidates: list, ref: str, names: Callable, what: str, describe:
         if best:
             return [c for s, c in scored if s == best]
     raise VaultError(f"I can't find {what} called '{ref}'. {describe()}")
+
+
+@dataclass
+class Deletion:
+    """A deletion planned but not made: title and body go on the approval card, and apply()
+    (run only once it's approved) makes it, raising VaultError if the note changed meanwhile."""
+    title: str
+    body: str
+    apply: Callable[[], str]
+
+
+@dataclass
+class _Spot:
+    """One place a deletion could be: a heading's section (lines a to b) or an exact passage
+    (characters a to b of the note's body, after its properties)."""
+    whole_lines: bool
+    a: int
+    b: int
+    label: str
+
+    def cut(self, lines: list[str]) -> tuple[list[str], str]:
+        """(the note without it, what goes). A passage that fills whole lines takes them too."""
+        if self.whole_lines:
+            return lines[:self.a] + lines[self.b:], "\n".join(lines[self.a:self.b])
+        start = _body_start(lines)
+        body = "\n".join(lines[start:])
+        a, b = self.a, self.b
+        gone = body[a:b]
+        if (a == 0 or body[a - 1] == "\n") and (b == len(body) or body[b] == "\n"):
+            if b < len(body):
+                b += 1                          # its line break too
+            elif a > 0:
+                a -= 1                          # the note's last lines: the break before them
+        kept = body[:a] + body[b:]
+        return lines[:start] + (kept.split("\n") if kept else []), gone
+
+    def glimpse(self, lines: list[str]) -> str:
+        """Where it is, to tell copies apart."""
+        if self.whole_lines:
+            inside = [ln.strip() for ln in lines[self.a + 1:self.b] if ln.strip()]
+            return f"line {self.a + 1}, " + (f"starting '{inside[0][:60]}'" if inside
+                                             else "nothing under it")
+        start = _body_start(lines)
+        before = "\n".join(lines[start:])[:self.a]
+        return f"line {start + before.count(chr(10)) + 1}"
 
 
 # --- The vault -------------------------------------------------------------------------------------
@@ -577,6 +623,167 @@ class Vault:
         progress = read_properties(lines).get("progress") or 0
         return (f"{'; '.join(said)} in {path.stem}. {done} of {total} tasks done; progress is set "
                 f"to {progress}%. [Offer to update progress if that looks wrong now.]")
+
+    # Deleting and moving. A deletion is only planned here: the tool puts it on an approval card
+    # and apply() makes it, after reading the note fresh and checking the same lines still go.
+
+    def _task_blocks(self, lines: list[str], ref: str, section: str | None
+                     ) -> tuple[TaskLine, list[tuple[int, int]]]:
+        """A task and where its copies are (line, line after its sub-items). Copies of the same
+        task (in "Next up" and "Tasks") are one task, unless a heading picks one."""
+        target = self._locate_task(lines, ref)
+        copies = [t for t in find_tasks(lines) if _key(t.text) == _key(target.text)]
+        if section:
+            wanted = _key(section)
+            picked = [t for t in copies if _key(t.section) == wanted]
+            if not picked:
+                where = ", ".join(sorted({t.section or "no heading" for t in copies}))
+                raise VaultError(f"'{target.text}' isn't under {section}; it's under {where}.")
+            copies = picked
+        blocks = [(t.index, _end_of_children(lines, t.index, len(lines))) for t in copies]
+        blocks = [b for b in blocks if not any(o[0] < b[0] < o[1] for o in blocks)]  # nested copy
+        return target, blocks
+
+    def delete_task(self, project: str, task: str, section: str | None = None) -> "Deletion":
+        """Plan deleting a task, its sub-items with it."""
+        path = self._find(project, projects_only=True)
+        lines, _ = self._read(path)
+        target, blocks = self._task_blocks(lines, task, section)
+        gone = [lines[a:b] for a, b in blocks]
+        where = " and ".join(sorted({t.section or "no heading" for t in find_tasks(lines)
+                                     if t.index in {a for a, _ in blocks}}))
+        subs = sum(len(g) - 1 for g in gone)
+        extra = f", with {subs} sub-item{'s' if subs != 1 else ''}" if subs else ""
+
+        def apply() -> str:
+            now, newline = self._read(path)
+            _, again = self._task_blocks(now, target.text, section)
+            if [now[a:b] for a, b in again] != gone:
+                raise VaultError(f"{path.stem} changed since, so I left it alone. "
+                                 "[Read it again and ask afresh.]")
+            for a, b in sorted(again, reverse=True):
+                del now[a:b]
+            self._save_project(path, now, newline, [f"Deleted task: {target.text}{extra}"])
+            return f"Deleted '{target.text}'{extra} from {path.stem}."
+
+        body = f"From {path.stem}, under {where}:\n" + "\n".join("\n".join(g) for g in gone)
+        return Deletion(f"Delete the task '{target.text}' from {path.stem}", body, apply)
+
+    def move_task(self, project: str, task: str, section: str | None = None,
+                  under: str | None = None, from_section: str | None = None) -> str:
+        """Move a task (with its sub-items) under another heading or beneath another task.
+        Nothing is lost, so it runs straight away, logged like the rest."""
+        if not section and not under:
+            raise VaultError("Where should it go: under which heading or task?")
+        path = self._find(project, projects_only=True)
+        lines, newline = self._read(path)
+        target, blocks = self._task_blocks(lines, task, from_section)
+        if len(blocks) > 1:
+            heads = ", ".join(sorted({t.section or "no heading" for t in find_tasks(lines)
+                                      if t.index in {a for a, _ in blocks}}))
+            raise VaultError(f"'{target.text}' is under {heads}. Which one should move?")
+        start, end = blocks[0]
+        block = lines[start:end]
+        rest = lines[:start] + lines[end:]
+        if under:
+            parent = self._locate_task(rest, under)
+            if _key(parent.text) == _key(target.text):
+                raise VaultError("A task can't go beneath itself.")
+            at, indent = _end_of_children(rest, parent.index, len(rest)), parent.indent + "\t"
+            where = f"under '{parent.text}'"
+        else:
+            s = find_section(rest, section)
+            if s is None:
+                heads = ", ".join(h[2] for h in _headings(rest)) or "none"
+                raise VaultError(f"{path.stem} has no '{section}' heading. Headings: {heads}.")
+            at, indent = _end_of_text(rest, s.line + 1, s.own_end), ""
+            where = f"under {s.title}"
+        base = re.match(r"^\s*", block[0]).group()
+        moved = [indent + ln[len(base):] if ln.startswith(base) else indent + ln.lstrip()
+                 for ln in block]
+        rest[at:at] = moved
+        self._save_project(path, rest, newline, [f"Moved task: {target.text} → {where}"])
+        return f"Moved '{target.text}' to {where} in {path.stem}."
+
+    def delete_text(self, note: str, text: str | None = None, heading: str | None = None,
+                    which: int | None = None) -> "Deletion":
+        """Plan deleting an exact passage, or a whole heading with its section. If it appears
+        more than once, `which` (1 = first in the note) says which; otherwise nothing is guessed."""
+        path = self._find(note)
+        lines, _ = self._read(path)
+        props = read_properties(lines)
+        project = str(props.get("type", "")).lower() == "project"
+        found = self._find_passage(path, lines, text, heading, project)
+        if len(found) > 1 and which is None:
+            options = "; ".join(f"{n}: {spot.glimpse(lines)}"
+                                for n, spot in enumerate(found[:6], 1))
+            raise VaultError(f"That's in {path.stem} {len(found)} times, so tell me which "
+                             f"(1 is the first in the note). {options}")
+        if which is not None and not 1 <= which <= len(found):
+            raise VaultError(f"It's only there {len(found)} time{'s' if len(found) > 1 else ''}.")
+        n = (which or 1) - 1
+        label = found[n].label
+        gone = found[n].cut(lines)[1]
+
+        def apply() -> str:
+            now, newline = self._read(path)
+            again = self._find_passage(path, now, text, heading, project)
+            if len(again) != len(found) or again[n].cut(now)[1] != gone:
+                raise VaultError(f"{path.stem} changed since, so I left it alone. "
+                                 "[Read it again and ask afresh.]")
+            kept = again[n].cut(now)[0]
+            if project:
+                self._save_project(path, kept, newline, [f"Deleted {label}"])
+            else:
+                if read_properties(kept).get("updated"):
+                    kept = set_property(kept, "updated", self._today())
+                self._write(path, kept, newline)
+                log.info("vault: %s: deleted %s", path.stem, label)
+            return f"Deleted {label} from {path.stem}."
+
+        return Deletion(f"Delete {label} from {path.stem}",
+                        f"From {path.stem}:\n{gone.rstrip()}", apply)
+
+    def _find_passage(self, path: Path, lines: list[str], text: str | None, heading: str | None,
+                      project: bool) -> list["_Spot"]:
+        """Every place it is, first in the note first."""
+        heading, text = _one_line(heading).lstrip("#").strip(), (text or "").replace("\r\n", "\n")
+        if heading and text.strip():
+            raise VaultError("Give a heading or a passage to delete, not both.")
+        if heading:
+            heads = _headings(lines)
+            hits = [h for h in heads if _key(h[2]) == _key(heading)]
+            if not hits:
+                names = ", ".join(h[2] for h in heads) or "none"
+                raise VaultError(f"{path.stem} has no heading called '{heading}'. "
+                                 f"Headings: {names}.")
+            if project and _key(heading) == "log":
+                raise VaultError("I don't delete a project's log: it's the record of changes.")
+            out = []
+            for i, level, title in hits:
+                # A project's log is never swept up with a section (a stray "# Heading" above it
+                # would otherwise hold the "## Log" under it)
+                end = next((h[0] for h in heads if h[0] > i and (
+                    h[1] <= level or project and _key(h[2]) == "log")), len(lines))
+                subs = [h[2] for h in heads if i < h[0] < end]
+                label = f"the heading '{title}' and its section" + (
+                    f", with {', '.join(subs)} under it" if subs else "")
+                out.append(_Spot(True, i, end, label))
+            return out
+        passage = text.strip("\n")
+        if not passage.strip():
+            raise VaultError("What should I delete? Give the exact words, or a heading.")
+        body = "\n".join(lines[_body_start(lines):])
+        spots, at = [], body.find(passage)
+        while at >= 0:
+            spots.append(at)
+            at = body.find(passage, at + 1)
+        if not spots:
+            raise VaultError(f"I can't find those exact words in {path.stem}. [Read it and copy "
+                             "the passage exactly, or give a heading.]")
+        short = _one_line(passage)
+        label = f"'{short[:80]}{'...' if len(short) > 80 else ''}'"
+        return [_Spot(False, s, s + len(passage), label) for s in spots]
 
     def update_project(self, project: str, status: str | None = None, progress: str | None = None,
                        next_step: str | None = None, log_entry: str | None = None) -> str:

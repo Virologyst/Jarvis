@@ -147,8 +147,10 @@ by the brain only from an approved card's action.
 ## Sir's project notes (Obsidian)
 `brain/jarvis_brain/vault.py` reads and updates the project notes in Sir's Obsidian vault
 (`JARVIS_VAULT`): project status, progress and next step (note properties), checkbox tasks, a
-log per project, new projects from the template, and bullets on any note (its mind map). Additive
-only, every change logged, files rewritten in one step because Sir edits them at the same time.
+log per project, new projects from the template, bullets on any note (its mind map), and moving
+tasks. Every change logged, files rewritten in one step because Sir edits them at the same time.
+Deleting a task or text (only when Sir asks) goes on an approval card and is re-checked before
+it's made.
 See [vault.md](vault.md).
 
 ## The internet
