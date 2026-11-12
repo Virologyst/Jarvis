@@ -48,6 +48,7 @@ from .mail import REPLY_KIND, Mailbox
 from .mail_watch import ImportantSenders, MailWatcher, Sorter, parse_quiet
 from .tasks import TaskStore
 from .vault import Vault
+from .web import KEY_VAR as WEB_KEY_VAR, WebAccess
 from .tools import REQUEST_TOOLS, ToolBox
 from .tts import make_speaker
 from .voicecommands import parse_voice_decision, pick_card
@@ -111,6 +112,10 @@ class Brain:
                 quiet=parse_quiet(os.environ.get("JARVIS_EMAIL_QUIET", "22:00-07:00")),
                 on_announced=self.mailbox.remember_list)
         self._mail_loop: asyncio.Task | None = None
+        # The internet (web.py): reading pages always works; searching needs a Brave key
+        self.web = WebAccess.from_env()
+        log.info("web search: %s", "configured" if self.web.search_configured
+                 else f"not set up ({WEB_KEY_VAR})")
         self.reminders = ReminderService(self.tasks, self.deliver_reminder)
         self._reminder_loop: asyncio.Task | None = None
         # Said once to the first terminal that connects: (card title, what to say)
@@ -132,6 +137,7 @@ class Brain:
                 loop.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await loop
+        await self.web.close()
 
     async def deliver_reminder(self, due) -> bool:
         """Say a task reminder (or an email announcement) on every terminal, each as soon as
@@ -193,7 +199,8 @@ class TerminalSession:
                         obsidian_terminals=lambda: (brain.obsidian_terminals()
                                                     if hasattr(brain, "obsidian_terminals") else {}),
                         vault=getattr(brain, "vault", None),
-                        mailbox=getattr(brain, "mailbox", None))
+                        mailbox=getattr(brain, "mailbox", None),
+                        web=getattr(brain, "web", None))
         self.conversation = Conversation(brain.client, s.model, s.effort, s.idle_reset_minutes,
                                          tools=REQUEST_TOOLS, run_tool=tools.run)
         self.listening = False

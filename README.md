@@ -22,7 +22,7 @@ touchscreen, talk normally, and Jarvis (Claude) answers out loud.
 | `firmware/` | ESP32-S3 mic node that tells the eye where sound is coming from ([docs/eye.md](docs/eye.md)) | the node |
 | `pi/` | Pi install, kiosk autostart, restart/stop helpers | Pi 5 |
 | `scripts/` | Dev-machine setup | dev PC |
-| `docs/` | [Architecture and decisions](docs/architecture.md), [the eye](docs/eye.md), [self-upgrade](docs/self-upgrade.md), [Obsidian vault](docs/vault.md), [working in Obsidian](docs/obsidian.md), [email](docs/email.md) | |
+| `docs/` | [Architecture and decisions](docs/architecture.md), [the eye](docs/eye.md), [self-upgrade](docs/self-upgrade.md), [Obsidian vault](docs/vault.md), [working in Obsidian](docs/obsidian.md), [email](docs/email.md), [the internet](docs/web.md) | |
 
 Each part has its own `pyproject.toml`, so a Pi installs only `protocol` + `terminal`
 (no GPU or Claude libraries).
@@ -79,4 +79,5 @@ All settings live in `.env` (see [.env.example](.env.example)). Key ones:
 `JARVIS_MODEL` (default `claude-opus-5-5`), `JARVIS_EFFORT` (default `low` for snappy
 conversation), `JARVIS_STT_MODEL`, `JARVIS_VOICE` and `JARVIS_VOICE_SPEED` (default
 `kokoro:bm_george` at 0.95: calm British RP; the candidates considered are listed beside
-`DEFAULT_VOICE` in `brain/jarvis_brain/config.py`), `JARVIS_BRAIN_URL`.
+`DEFAULT_VOICE` in `brain/jarvis_brain/config.py`), `JARVIS_BRAIN_URL`, and
+`JARVIS_BRAVE_API_KEY` for web search (add it by hand; see [the internet](docs/web.md)).

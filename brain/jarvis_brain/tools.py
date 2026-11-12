@@ -4,8 +4,8 @@ Every tool that changes anything outside Jarvis only *proposes* it: the handler 
 the screen and the real work runs after someone taps Approve (see approvals.py). Jarvis's own
 state (the screen theme, the task lists) changes directly, and so do Sir's Obsidian project notes,
 which he asked Jarvis to keep (additions and ticks only, each one logged). Reading files (on the
-brain or a terminal) runs directly; writing files on the brain is proposed on a card like
-everything else. Add new tools here.
+brain or a terminal) and searching or reading the web run directly; writing files on the brain
+is proposed on a card like everything else. Add new tools here.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ from .mail import REPLY_KIND, Mailbox
 from .tasks import TaskError, TaskStore
 from .themes import THEMES, describe
 from .vault import Vault, VaultError
+from .web import DEFAULT_RESULTS, WebAccess
 
 log = logging.getLogger(__name__)
 
@@ -571,6 +572,38 @@ TOOLS += [
 ]
 _EMAIL_TOOLS = {"email_inbox", "email_read", "email_search", "email_important", "email_reply"}
 
+# --- The internet (web.py) ----------------------------------------------------------------------
+# Read-only, so no card: searching sends the query to Brave Search (key in the brain's .env), and
+# reading fetches a public page's text. Web content is untrusted outside content, like email.
+TOOLS += [
+    {
+        "name": "web_search",
+        "description": (
+            "Web search on the internet: look up online anything current or that you don't know, "
+            "e.g. products and prices in Australia ('multi-bay hard drive docks'), news, opening "
+            "hours, facts. Returns the top results with title, short snippet, source site and "
+            "web address (the address is for read_web_page, never to read out). To browse a "
+            "result in full, use read_web_page."),
+        "input_schema": _schema(
+            {"query": {"type": "string", "description": "What to search for, as search words."},
+             "count": {"type": "string", "description": "How many results, 1 to 10 (default 5)."}},
+            ["query"]),
+    },
+    {
+        "name": "read_web_page",
+        "description": (
+            "Browse the internet: open a web page online by its address (usually from "
+            "web_search) and read its main text, without menus, scripts or adverts. Long pages "
+            "come back in parts; the result says which start to use to read on."),
+        "input_schema": _schema(
+            {"url": {"type": "string", "description": "The page's full web address."},
+             "start": {"type": "integer",
+                       "description": "Character to start from: 0 for the beginning."}},
+            ["url"]),
+    },
+]
+_WEB_TOOLS = {"web_search", "read_web_page"}
+
 # --- Working in Obsidian with Sir (live, through a terminal's Local REST API plugin) ------------
 # Sent to a terminal as FileRequests ("obsidian_*"); the terminal calls Obsidian on its machine
 # (terminal/jarvis_terminal/obsidian.py). Unlike the vault_* tools, these see what Sir has open
@@ -719,8 +752,10 @@ class ToolBox:
                  file_terminals: Callable[[], dict[str, RemoteFiles]] | None = None,
                  vault: Vault | None = None,
                  mailbox: Mailbox | None = None,
-                 obsidian_terminals: Callable[[], dict[str, RemoteFiles]] | None = None):
+                 obsidian_terminals: Callable[[], dict[str, RemoteFiles]] | None = None,
+                 web: WebAccess | None = None):
         self.upgrades = upgrades
+        self.web = web
         self.obsidian_terminals = obsidian_terminals or dict
         self.show_card = show_card
         self.current_theme = current_theme
@@ -772,6 +807,20 @@ class ToolBox:
             except (OSError, aiohttp.ClientError, asyncio.TimeoutError) as e:
                 log.warning("email: %s", e)
                 return "I couldn't reach Microsoft's email service just now."
+        if name in _WEB_TOOLS:
+            if self.web is None:
+                return "Internet access isn't connected here."
+            if name == "web_search":
+                try:
+                    count = int(str(args.get("count") or DEFAULT_RESULTS).strip())
+                except ValueError:   # a loose tool: the value may not be a number
+                    count = DEFAULT_RESULTS
+                return await self.web.search(str(args.get("query") or ""), count)
+            try:
+                start = int(args.get("start") or 0)
+            except (TypeError, ValueError):
+                start = 0
+            return await self.web.read(str(args.get("url") or ""), start)
         if name in _VAULT_TOOLS:
             if self.vault is None:
                 return "The notes vault isn't connected here."

@@ -151,6 +151,13 @@ log per project, new projects from the template, and bullets on any note (its mi
 only, every change logged, files rewritten in one step because Sir edits them at the same time.
 See [vault.md](vault.md).
 
+## The internet
+`brain/jarvis_brain/web.py`: `web_search` (Brave Search API, key `JARVIS_BRAVE_API_KEY` in the
+brain's `.env`, added by hand) and `read_web_page` (a page's main text, in parts). Read-only GETs
+with no cookies, so no approval card; only public internet addresses (checked at lookup and on
+every redirect), with timeouts and size caps. Web content is untrusted, like email. See
+[web.md](web.md).
+
 ## Roadmap
 1. Skeleton: wake word → STT → Claude → TTS on the dev PC. Built and tested end to end
    except the Claude call itself (needs an API key in `.env`). Measured on the dev PC
