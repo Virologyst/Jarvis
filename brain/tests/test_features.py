@@ -88,6 +88,31 @@ def test_theme_lookup() -> None:
     assert THEMES["arc"].voice == "kokoro:bf_lily"     # the Arc theme speaks with Lily
 
 
+def test_default_voice_is_a_measured_british_male(monkeypatch) -> None:
+    from jarvis_brain.config import DEFAULT_VOICE, DEFAULT_VOICE_SPEED, VOICE_CANDIDATES, Settings
+    from jarvis_brain.tts import _parse_mix
+
+    monkeypatch.delenv("JARVIS_VOICE", raising=False)
+    monkeypatch.delenv("JARVIS_VOICE_SPEED", raising=False)
+    settings = Settings.from_env()
+    assert settings.voice == DEFAULT_VOICE == "kokoro:bm_george"
+    assert settings.voice_speed == DEFAULT_VOICE_SPEED and 0.85 <= DEFAULT_VOICE_SPEED < 1.0
+    assert all(name.startswith("bm_") for name in _parse_mix(DEFAULT_VOICE.removeprefix("kokoro:")))
+    assert VOICE_CANDIDATES[DEFAULT_VOICE].startswith("chosen")
+    # Every theme but Arc speaks with the default; Arc keeps Lily at her own pace
+    assert all(t.voice is None and t.speed is None for n, t in THEMES.items() if n != "arc")
+    assert (THEMES["arc"].voice, THEMES["arc"].speed) == ("kokoro:bf_lily", 1.05)
+
+
+def test_voice_stays_configurable(monkeypatch) -> None:
+    from jarvis_brain.config import Settings
+
+    monkeypatch.setenv("JARVIS_VOICE", "kokoro:bm_daniel")
+    monkeypatch.setenv("JARVIS_VOICE_SPEED", "1.12")
+    settings = Settings.from_env()
+    assert (settings.voice, settings.voice_speed) == ("kokoro:bm_daniel", 1.12)
+
+
 def test_theme_choice_is_remembered(tmp_path) -> None:
     store = ThemeStore(tmp_path / "themes.json")
     assert store.get("office-pi").name == "eye"

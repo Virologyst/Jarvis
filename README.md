@@ -77,4 +77,6 @@ Update later with `cd ~/Jarvis && git pull && pi/restart.sh`.
 
 All settings live in `.env` (see [.env.example](.env.example)). Key ones:
 `JARVIS_MODEL` (default `claude-opus-5-5`), `JARVIS_EFFORT` (default `low` for snappy
-conversation), `JARVIS_STT_MODEL`, `JARVIS_VOICE`, `JARVIS_BRAIN_URL`.
+conversation), `JARVIS_STT_MODEL`, `JARVIS_VOICE` and `JARVIS_VOICE_SPEED` (default
+`kokoro:bm_george` at 0.95: calm British RP; the candidates considered are listed beside
+`DEFAULT_VOICE` in `brain/jarvis_brain/config.py`), `JARVIS_BRAIN_URL`.
