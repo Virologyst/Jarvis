@@ -6,7 +6,8 @@ JARVIS_OBSIDIAN_KEY). Going through Obsidian, rather than writing files, means J
 which note is open, open notes on screen, and edit a note Sir has open without clobbering it.
 
 Ops (args): obsidian_active, obsidian_read (note, heading), obsidian_edit (note, action, heading,
-text), obsidian_open (note), obsidian_search (query), obsidian_canvas (canvas, cards, links,
+text), obsidian_delete (note, text, heading, which, preview, expect), obsidian_open (note),
+obsidian_search (query), obsidian_canvas (canvas, cards, links,
 edit_cards, remove_cards, edit_links, remove_links, preview).
 A note is a vault path ("Projects/J.A.R.V.I.S.md"), a name ("J.A.R.V.I.S"), or "" for the note
 open now. Headings are "Parent > Child". Everything answers (ok, text) for Jarvis to use.
@@ -94,6 +95,71 @@ def insert(text: str, new: str, path: list[str], at_top: bool) -> str | None:
     added = new.strip("\n").splitlines()
     out = lines[:spot] + added + lines[spot:]
     return "\n".join(out) + ("\n" if text.endswith("\n") or not text else "")
+
+
+def cut(text: str, passage: str = "", path: list[str] | None = None,
+        which: int | None = None) -> tuple[str, str, str]:
+    """(the note without it, what goes, what to call it) for an exact passage, or a heading path
+    with its whole section. Below any front matter only. Missing, or there more than once without
+    `which` (1 = first), raises ObsidianError saying so: nothing is guessed."""
+    crlf = "\r\n" in text
+    text = text.replace("\r\n", "\n")
+    front = re.match(r"^---\n.*?\n---\n", text, re.S)
+    top = front.end() if front else 0
+    spots: list[tuple[int, int]] = []
+    subs: dict[int, list[str]] = {}        # a heading's start -> the subheadings that go with it
+    if path:
+        if passage.strip():
+            raise ObsidianError("Give a heading or a passage to delete, not both.")
+        lines = text.splitlines(keepends=True)
+        starts = [sum(len(ln) for ln in lines[:i]) for i in range(len(lines) + 1)]
+        marks = [(i, len(m.group(1)), m.group(2).strip().lower()) for i, line in enumerate(lines)
+                 if (m := re.match(r"^(#{1,6})\s+(.*?)\s*#*\s*$", line.rstrip("\n")))]
+        lo, hi = -1, len(lines)                    # inside the parent heading, if one is given
+        if len(path) > 1:
+            parent = section_lines([ln.rstrip("\n") for ln in lines], path[:-1])
+            if parent is None:
+                raise ObsidianError(f"There's no heading {' > '.join(path[:-1])} in that note.")
+            lo, hi = parent
+        for i, level, title in marks:
+            if lo < i < hi and title == path[-1].lower() and starts[i] >= top:
+                # A project's log is never swept up with a section above it
+                end = next((j for j, n, t in marks if j > i and (n <= level or t == "log")),
+                           len(lines))
+                subs[starts[i]] = [lines[j].lstrip("#").strip() for j, _, _ in marks if i < j < end]
+                spots.append((starts[i], starts[end]))
+        label = f"the heading {' > '.join(path)} and its section"
+        if not spots:
+            raise ObsidianError(f"There's no heading {' > '.join(path)} in that note. Its "
+                                "headings: " + (", ".join(headings(text)) or "none") + ".")
+    else:
+        passage = passage.replace("\r\n", "\n").strip("\n")
+        if not passage.strip():
+            raise ObsidianError("What should I delete? Give the exact words, or a heading.")
+        at = text.find(passage, top)
+        while at >= 0:
+            spots.append((at, at + len(passage)))
+            at = text.find(passage, at + 1)
+        if not spots:
+            raise ObsidianError("I can't find those exact words in that note. Read it and copy "
+                                "the passage exactly, or give a heading.")
+        short = " ".join(passage.split())
+        label = f"'{short[:80]}{'...' if len(short) > 80 else ''}'"
+    if len(spots) > 1 and which is None:
+        where = "; ".join(f"{n}: line {text[:a].count(chr(10)) + 1}"
+                          for n, (a, _) in enumerate(spots[:6], 1))
+        raise ObsidianError(f"That's in the note {len(spots)} times, so say which (1 is the "
+                            f"first in the note): {where}.")
+    if which is not None and not 1 <= which <= len(spots):
+        raise ObsidianError(f"It's only there {len(spots)} time{'s' if len(spots) > 1 else ''}.")
+    a, b = spots[(which or 1) - 1]
+    if path and subs[a]:
+        label += f", with {', '.join(subs[a])} under it"
+    gone = text[a:b].rstrip("\n")
+    if (a == 0 or text[a - 1] == "\n") and b < len(text) and text[b] == "\n":
+        b += 1                                     # a passage of whole lines: its break goes too
+    kept = text[:a] + text[b:]
+    return (kept.replace("\n", "\r\n") if crlf else kept), gone, label
 
 
 def headings(text: str) -> list[str]:
@@ -510,6 +576,29 @@ class ObsidianBridge:
             "Content-Type": "text/markdown", "Operation": action, "Target-Type": "heading",
             "Target": urllib.parse.quote("::".join(parts)), "Target-Delimiter": "::",
             "Create-Target-If-Missing": "true"})
+
+    def op_delete(self, note: str = "", text: str = "", heading: str = "", which=None,
+                  preview: bool = False, expect: str = "") -> str:
+        """Delete an exact passage, or a heading with its section. The brain asks for a preview
+        (what would go, nothing saved) for its approval card, then sends the same request with
+        that preview as `expect`: if the note no longer gives exactly the same, nothing changes.
+        Saved only if the note hasn't changed since it was read (If-Match)."""
+        api, path = self._target(note)
+        number = int(which) if str(which or "").strip().isdigit() else None
+        current, info = self._exchange("GET", api, headers={"Accept": "text/markdown"})
+        kept, gone, label = cut(current, text, split_heading(heading), number)
+        plan = f"Delete {label} from {path}:\n{gone[:MAX_TEXT]}" + (
+            "\n[...and more]" if len(gone) > MAX_TEXT else "")
+        if preview:
+            return plan
+        if not expect or plan != expect:
+            raise ObsidianError(f"{path} has changed since the card went up, so I left it alone. "
+                                "Read it again and ask afresh.")
+        tag = info.get("etag")
+        self._call("PUT", api, kept, {"Content-Type": "text/markdown",
+                                      **({"If-Match": tag} if tag else {})})
+        log.info("obsidian: deleted %s from %s", label, path)
+        return f"Deleted {label} from {path}."
 
     def op_open(self, note: str) -> str:
         path = self.resolve(note)

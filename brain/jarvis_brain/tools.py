@@ -3,7 +3,8 @@
 Every tool that changes anything outside Jarvis only *proposes* it: the handler returns a card for
 the screen and the real work runs after someone taps Approve (see approvals.py). Jarvis's own
 state (the screen theme, the task lists) changes directly, and so do Sir's Obsidian project notes,
-which he asked Jarvis to keep (additions and ticks only, each one logged). Reading files (on the
+which he asked Jarvis to keep (additions, ticks and moves, each one logged; deleting from them
+goes on a card). Reading files (on the
 brain or a terminal) and searching or reading the web run directly; writing files on the brain
 is proposed on a card like everything else. Add new tools here.
 """
@@ -13,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from collections.abc import Awaitable, Callable
 
 import aiohttp
@@ -407,8 +409,9 @@ _THIS_TERMINAL = {"this terminal", "this", "here", "terminal", "this one", "this
 _BRAIN = {"brain", "the brain", "server", "jarvis"}
 
 # --- Sir's Obsidian vault (vault.py) --------------------------------------------------------------
-# Project notes Sir asked Jarvis to keep up to date. Nothing is ever deleted (tasks are ticked
-# off, not removed) and every change is written in the project's Log, so these run without a card.
+# Project notes Sir asked Jarvis to keep up to date. Adding, ticking, rewording and moving change
+# nothing away and every change is written in the project's Log, so these run without a card;
+# deleting (below) goes on one.
 
 _PROJECT = {"type": "string",
             "description": "Which project, by name, e.g. 'J.A.R.V.I.S' or 'Jarvis'."}
@@ -501,9 +504,63 @@ TOOLS += [
             ["note", "heading", "text"]),
         "strict": True,
     },
+    {
+        "name": "vault_move_task",
+        "description": (
+            "Move a project's task, with its sub-items, under another heading or beneath "
+            "another task. Refer to it by its number from vault_read (best) or words from it. "
+            "from_section picks one copy if it's under two headings."),
+        "input_schema": _schema(
+            {"project": _PROJECT,
+             "task": {"type": "string", "description": "The task's number or words from it."},
+             "section": {"type": "string", "description": "Heading to move it under."},
+             "under": {"type": "string", "description": "A task (number or words) to nest it "
+                                                         "beneath instead."},
+             "from_section": {"type": "string", "description": "The heading it's under now."}},
+            ["project", "task"]),
+    },
+]
+# Deleting from Sir's notes goes on an approval card, like every deletion; the card says exactly
+# what goes, and it's made only once approved, if the note still has the same lines.
+TOOLS += [
+    {
+        "name": "vault_delete_task",
+        "description": (
+            "Delete a task (its checkbox line and the sub-items under it) from a project, only "
+            "when Sir asks. Refer to it by its number from vault_read (best) or its words. "
+            "Copies under two headings are one task and both go, unless section names one. "
+            "Puts up an approval card; logged in the project's log."),
+        "input_schema": _schema(
+            {"project": _PROJECT,
+             "task": {"type": "string", "description": "The task's number or words from it."},
+             "section": {"type": "string", "description": "Only the copy under this heading."}},
+            ["project", "task"]),
+    },
+    {
+        "name": "vault_delete_text",
+        "description": (
+            "Delete from any note in Sir's vault, only when Sir asks: either an exact passage "
+            "(text, copied exactly from vault_read) or a whole heading with its section "
+            "(heading, e.g. a stray duplicate heading). If it's there more than once, which "
+            "says which (1 = first in the note); otherwise the copies come back to choose "
+            "from. Puts up an approval card; logged."),
+        "input_schema": _schema(
+            {"note": {"type": "string", "description": "The note's name."},
+             "text": {"type": "string", "description": "The exact passage to delete."},
+             "heading": {"type": "string", "description": "A heading to delete with its section."},
+             "which": {"type": "integer", "description": "Which copy, 1 = first in the note."}},
+            ["note"]),
+    },
 ]
 _VAULT_TOOLS = {"vault_projects", "vault_read", "vault_add_task", "vault_update_task",
-                "vault_update_project", "vault_new_project", "vault_add_point"}
+                "vault_update_project", "vault_new_project", "vault_add_point", "vault_move_task"}
+_VAULT_DELETE_TOOLS = {"vault_delete_task", "vault_delete_text"}
+
+
+def _which(value) -> int | None:
+    """A loose tool's 'which copy' setting: a whole number from 1, or None."""
+    m = re.search(r"\d+", str(value or ""))
+    return int(m.group()) if m and int(m.group()) > 0 else None
 
 # --- Sir's email (mail.py, through Microsoft Graph) ---------------------------------------------
 # Reading runs directly (reading one marks it read); a reply is only drafted and put on an
@@ -643,6 +700,23 @@ TOOLS += [
             ["action", "text"]),
     },
     {
+        "name": "obsidian_delete",
+        "description": (
+            "Delete from a note in Obsidian, live, only when Sir asks: either an exact passage "
+            "(text, copied exactly from obsidian_read) or a whole heading with its section "
+            "(heading, e.g. a stray duplicate heading). If it's there more than once, which "
+            "says which (1 = first in the note); otherwise the copies come back to choose "
+            "from. Puts up an approval card."),
+        "input_schema": _schema(
+            {"note": _NOTE,
+             "text": {"type": "string", "description": "The exact passage to delete."},
+             "heading": {"type": "string",
+                         "description": "A heading to delete with its section, nested ones as "
+                                        "'Parent > Child'."},
+             "which": {"type": "integer", "description": "Which copy, 1 = first in the note."}},
+            []),
+    },
+    {
         "name": "obsidian_show",
         "description": "Open a note on Sir's screen in Obsidian ('show me the J.A.R.V.I.S notes').",
         "input_schema": _schema({"note": {"type": "string",
@@ -703,7 +777,8 @@ TOOLS += [
 ]
 # tool name -> the terminal's op
 _OBSIDIAN_OPS = {"obsidian_open_note": "obsidian_active", "obsidian_read": "obsidian_read",
-                 "obsidian_write": "obsidian_edit", "obsidian_show": "obsidian_open",
+                 "obsidian_write": "obsidian_edit", "obsidian_delete": "obsidian_delete",
+                 "obsidian_show": "obsidian_open",
                  "obsidian_search": "obsidian_search", "obsidian_canvas": "obsidian_canvas"}
 
 # --- Coding: Claude Code in Sir's project folders, on the PC whose terminal runs the coder ------
@@ -874,10 +949,12 @@ class ToolBox:
             except (TypeError, ValueError):
                 start = 0
             return await self.web.read(str(args.get("url") or ""), start)
-        if name in _VAULT_TOOLS:
+        if name in _VAULT_TOOLS or name in _VAULT_DELETE_TOOLS:
             if self.vault is None:
                 return "The notes vault isn't connected here."
             try:
+                if name in _VAULT_DELETE_TOOLS:
+                    return await self._propose_vault_delete(name, args)
                 return self._run_vault_tool(name, args)
             except VaultError as e:
                 return str(e)
@@ -1057,6 +1134,12 @@ class ToolBox:
             clean = self._tidy_canvas(clean)
             if clean.get("remove_cards") or clean.get("remove_links"):
                 return await self._propose_canvas(remote, clean)
+        elif name == "obsidian_delete":
+            clean = {k: str(v) for k, v in clean.items() if k in ("note", "text", "heading")}
+            which = _which(args.get("which"))
+            if which:
+                clean["which"] = which
+            return await self._propose_obsidian_delete(remote, clean)
         else:
             clean = {k: str(v) for k, v in clean.items()}
         try:
@@ -1118,6 +1201,53 @@ class ToolBox:
         card = self.approvals.propose(title, plan, action)
         await self.show_card(card)
         return f"An approval card is up: {plan} Nothing changes until it's approved."
+
+    async def _propose_obsidian_delete(self, remote: RemoteFiles, args: dict) -> str:
+        """Deleting from a note in Obsidian goes on an approval card. The terminal finds it first
+        (preview), so a missing or ambiguous passage is said now; once approved it deletes only if
+        the note still shows exactly what the card did (expect)."""
+        if self.approvals is None:
+            return "Deleting from a note needs the approval screen, which isn't here."
+        try:
+            plan = await remote("obsidian_delete", {**args, "preview": True})
+        except FileAccessError as e:
+            return str(e)
+
+        async def action() -> str:
+            try:
+                return await remote("obsidian_delete", {**args, "expect": plan})
+            except FileAccessError as e:
+                return str(e)
+
+        title = plan.split("\n", 1)[0].rstrip(":")
+        card = self.approvals.propose(title, plan, action)
+        await self.show_card(card)
+        return f"An approval card is up: {title}. Nothing is deleted until it's approved."
+
+    async def _propose_vault_delete(self, name: str, args: dict) -> str:
+        """Plan the deletion (finding it, or saying why not) and put it on an approval card."""
+        if self.approvals is None:
+            return "Deleting from the notes needs the approval screen, which isn't here."
+        v = self.vault
+        if name == "vault_delete_task":
+            plan = v.delete_task(str(args.get("project") or ""), str(args.get("task") or ""),
+                                 str(args.get("section") or "") or None)
+        else:
+            plan = v.delete_text(str(args.get("note") or ""), str(args.get("text") or ""),
+                                 str(args.get("heading") or ""), _which(args.get("which")))
+
+        async def action() -> str:
+            try:
+                return await asyncio.to_thread(plan.apply)
+            except VaultError as e:
+                return str(e)
+            except OSError as e:
+                log.warning("vault: %s", e)
+                return f"I couldn't get to that note just now ({e.strerror or e})."
+
+        card = self.approvals.propose(plan.title, plan.body, action)
+        await self.show_card(card)
+        return f"An approval card is up: {plan.title}. Nothing is deleted until it's approved."
 
     async def _run_email_tool(self, name: str, args: dict) -> str:
         m = self.mailbox
@@ -1193,5 +1323,8 @@ class ToolBox:
                                     arg("next_step"), arg("log"))
         if name == "vault_new_project":
             return v.new_project(arg("name") or "", arg("about"), arg("status"))
+        if name == "vault_move_task":
+            return v.move_task(arg("project") or "", arg("task") or "", arg("section"),
+                               arg("under"), arg("from_section"))
         return v.add_point(arg("note") or "", arg("heading") or "", arg("text") or "",
                            arg("under"))

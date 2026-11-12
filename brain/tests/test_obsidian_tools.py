@@ -97,10 +97,44 @@ def test_canvas_removals_wait_for_approval():
         "obsidian_canvas", {"canvas": "Board", "remove_links": [{"from": "a", "to": "b"}]}))
 
 
+def test_deleting_from_a_note_waits_for_approval():
+    calls, shown = [], []
+
+    async def show(card):
+        shown.append(card)
+
+    async def remote(op, args):
+        calls.append((op, args))
+        return ("Delete the heading Craig's tasks and its section from Projects/M.md:\n"
+                "# Craig's tasks" if args.get("preview") else "Deleted it.")
+
+    gate = ApprovalGate()
+    tools = ToolBox(None, show, approvals=gate, terminal_id=lambda: "craig-pc",
+                    obsidian_terminals=lambda: {"craig-pc": remote})
+    said = asyncio.run(tools.run("obsidian_delete", {"note": "M", "heading": "Craig's tasks",
+                                                     "which": "2nd", "text": ""}))
+    assert "approval card is up" in said and "Nothing is deleted" in said
+    assert calls == [("obsidian_delete", {"note": "M", "heading": "Craig's tasks", "which": 2,
+                                          "preview": True})]
+    assert shown[0].title == "Delete the heading Craig's tasks and its section from Projects/M.md"
+    assert asyncio.run(gate.decide(shown[0].card_id, "approve")) == "Deleted it."
+    assert calls[-1] == ("obsidian_delete", {"note": "M", "heading": "Craig's tasks", "which": 2,
+                                             "expect": shown[0].body})
+    # Missing or ambiguous: said straight away, no card
+    failing = ToolBox(None, show, approvals=gate, terminal_id=lambda: "craig-pc",
+                      obsidian_terminals=lambda: {"craig-pc": terminal(
+                          "craig-pc", [], fail="That's in the note 2 times, so say which.")})
+    assert "2 times" in asyncio.run(failing.run("obsidian_delete", {"text": "x"}))
+    assert len(shown) == 1
+    assert "approval screen" in asyncio.run(ToolBox(
+        None, show, terminal_id=lambda: "craig-pc",
+        obsidian_terminals=lambda: {"craig-pc": remote}).run("obsidian_delete", {"text": "x"}))
+
+
 def test_tools_load_on_demand_and_the_request_is_valid():
     obsidian = [t for t in REQUEST_TOOLS if t.get("name", "").startswith("obsidian_")]
     assert {t["name"] for t in obsidian} == {"obsidian_open_note", "obsidian_read",
-                                             "obsidian_write", "obsidian_show",
+                                             "obsidian_write", "obsidian_delete", "obsidian_show",
                                              "obsidian_search", "obsidian_canvas"}
     assert all(t["defer_loading"] and not t["strict"] for t in obsidian)
     assert all(t["name"] in SYSTEM_PROMPT for t in obsidian if t["name"] != "obsidian_read")

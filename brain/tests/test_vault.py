@@ -220,6 +220,160 @@ def test_add_task_to_tasks_heading_a_group_and_as_a_substep(vault: Vault):
         vault.add_task("Jarvis", "x", section="Budget")
 
 
+# --- Deleting and moving -----------------------------------------------------------------------
+
+MINESWEEPER = """---
+type: project
+updated: 2026-10-27
+---
+# Craig's tasks
+- [ ] Flag mines
+\t- [ ] Flag sprite
+
+## Notes
+- grid
+
+# Craig's tasks
+- [ ] Flag mines
+
+## Log
+- 2026-10-27: Started.
+"""
+
+
+def test_delete_task_with_its_sub_items_only_once_applied_and_logged(vault: Vault):
+    path = vault.root / "Projects" / "J.A.R.V.I.S.md"
+    before = path.read_bytes()
+    plan = vault.delete_task("Jarvis", "5")
+    assert plan.title == "Delete the task 'Pi terminal' from J.A.R.V.I.S"
+    assert plan.body == "From J.A.R.V.I.S, under Terminals:\n- [ ] Pi terminal\n\t- [ ] Speakerphone"
+    assert path.read_bytes() == before                       # planning changes nothing
+    assert plan.apply() == "Deleted 'Pi terminal', with 1 sub-item from J.A.R.V.I.S."
+    note = text(vault, "Projects/J.A.R.V.I.S.md").replace("\r\n", "\n")
+    assert "### Terminals\n- [ ] Email via Graph #j\n" in note and "Speakerphone" not in note
+    assert "## Log\n- 2026-10-28: Deleted task: Pi terminal, with 1 sub-item\n" in note
+    assert path.read_bytes().count(b"\r\n") == path.read_bytes().count(b"\n")
+
+
+def test_delete_task_copies_go_together_unless_a_heading_picks_one(vault: Vault):
+    both = vault.delete_task("Jarvis", "installer")
+    assert "under Brain PC and Next up" in both.body
+    one = vault.delete_task("Jarvis", "installer", section="Next up")
+    assert one.body == "From J.A.R.V.I.S, under Next up:\n- [ ] Run the installer"
+    one.apply()
+    note = text(vault, "Projects/J.A.R.V.I.S.md").replace("\r\n", "\n")
+    # what's left: the property, the copy under Brain PC and the log line
+    assert "## Next up\n\n## Tasks" in note and note.count("Run the installer") == 3
+    with pytest.raises(VaultError, match="changed since"):
+        both.apply()                                        # planned before: no longer the same
+    with pytest.raises(VaultError, match="isn't under Ideas; it's under Brain PC"):
+        vault.delete_task("Jarvis", "installer", section="Ideas")
+    with pytest.raises(VaultError, match="Which one?"):
+        vault.add_task("Jarvis", "Check the Pi speaker")
+        vault.delete_task("Jarvis", "pi")
+
+
+def test_move_task_under_a_heading_or_another_task(vault: Vault):
+    out = vault.move_task("Jarvis", "pi terminal", section="Brain PC")
+    assert out == "Moved 'Pi terminal' to under Brain PC in J.A.R.V.I.S."
+    note = text(vault, "Projects/J.A.R.V.I.S.md").replace("\r\n", "\n")
+    assert ("- [ ] Reboot and check\n- [ ] Pi terminal\n\t- [ ] Speakerphone\n### Terminals\n"
+            "- [ ] Email via Graph #j\n") in note
+    assert "- 2026-10-28: Moved task: Pi terminal → under Brain PC\n" in note
+    vault.move_task("Jarvis", "pi terminal", under="reboot")
+    note = text(vault, "Projects/J.A.R.V.I.S.md").replace("\r\n", "\n")
+    assert "- [ ] Reboot and check\n\t- [ ] Pi terminal\n\t\t- [ ] Speakerphone\n" in note
+    with pytest.raises(VaultError, match="Which one should move"):
+        vault.move_task("Jarvis", "installer", section="Terminals")
+    vault.move_task("Jarvis", "installer", section="Terminals", from_section="Next up")
+    assert "- [ ] Email via Graph #j\n- [ ] Run the installer\n" in text(
+        vault, "Projects/J.A.R.V.I.S.md").replace("\r\n", "\n")
+    with pytest.raises(VaultError, match="no 'Budget' heading"):
+        vault.move_task("Jarvis", "reboot", section="Budget")
+    with pytest.raises(VaultError, match="Where should it go"):
+        vault.move_task("Jarvis", "reboot")
+
+
+def test_delete_a_stray_duplicate_heading_but_never_guess(vault: Vault):
+    (vault.root / "Projects" / "Project Minesweeper.md").write_text(MINESWEEPER, encoding="utf-8")
+    with pytest.raises(VaultError, match="2 times.*1: line 5, starting '- \\[ \\] Flag mines'; "
+                                         "2: line 12"):
+        vault.delete_text("Minesweeper", heading="Craig's tasks")
+    with pytest.raises(VaultError, match="only there 2 times"):
+        vault.delete_text("Minesweeper", heading="Craig's tasks", which=3)
+    with pytest.raises(VaultError, match="no heading called 'Craigs'"):
+        vault.delete_text("Minesweeper", heading="Craigs")      # never a partial match
+    with pytest.raises(VaultError, match="don't delete a project's log"):
+        vault.delete_text("Minesweeper", heading="Log")
+    with pytest.raises(VaultError, match="not both"):
+        vault.delete_text("Minesweeper", text="grid", heading="Notes")
+    first = vault.delete_text("Minesweeper", heading="Craig's tasks", which=1)
+    assert first.title.endswith("its section, with Notes under it from Project Minesweeper")
+    # The stray copy: a "# heading" holds the "## Log" under it, but the log is never swept up
+    plan = vault.delete_text("Minesweeper", heading="# Craig's tasks", which=2)
+    assert plan.title == "Delete the heading 'Craig's tasks' and its section from Project Minesweeper"
+    assert plan.body == "From Project Minesweeper:\n# Craig's tasks\n- [ ] Flag mines"
+    assert plan.apply() == ("Deleted the heading 'Craig's tasks' and its section from "
+                            "Project Minesweeper.")
+    note = text(vault, "Projects/Project Minesweeper.md")
+    assert note.count("# Craig's tasks") == 1 and note.count("- [ ] Flag mines") == 1
+    assert "## Notes\n- grid\n\n## Log\n- 2026-10-28: Deleted the heading 'Craig's tasks' and " \
+        "its section\n- 2026-10-27: Started." in note
+    assert "updated: 2026-10-28" in note
+
+
+def test_delete_an_exact_passage(vault: Vault):
+    with pytest.raises(VaultError, match="can't find those exact words"):
+        vault.delete_text("Success Map", text="Laser")
+    with pytest.raises(VaultError, match="can't find those exact words"):
+        vault.delete_text("Success Map", text="type: map")      # properties are left alone
+    with pytest.raises(VaultError, match="What should I delete"):
+        vault.delete_text("Success Map", text=" \n")
+    plan = vault.delete_text("Success Map", text="\t- 3D printers\n")
+    assert plan.body == "From Success Map:\n\t- 3D printers"
+    assert plan.apply() == "Deleted '- 3D printers' from Success Map."
+    note = text(vault, "Success Map.md")
+    assert note.endswith("## Ideas\n- Workshop\n") and "updated: 2026-10-28" in note
+    vault.delete_text("Success Map", text=": use the template").apply()   # part of a line
+    assert "- *Your next project*\n" in text(vault, "Success Map.md")
+    stale = vault.delete_text("Success Map", text="- Workshop")
+    vault.add_point("Success Map", "Ideas", "Workshop", under="Workshop")  # now there twice
+    with pytest.raises(VaultError, match="changed since"):
+        stale.apply()
+
+
+def test_deleting_through_the_toolbox_goes_on_an_approval_card(vault: Vault):
+    from jarvis_brain.approvals import ApprovalGate
+    shown = []
+
+    async def show(card):
+        shown.append(card)
+
+    gate = ApprovalGate()
+    box = ToolBox(None, show, vault=vault, approvals=gate)
+    said = asyncio.run(box.run("vault_delete_task", {"project": "Jarvis", "task": "reboot"}))
+    assert said == ("An approval card is up: Delete the task 'Reboot and check' from J.A.R.V.I.S. "
+                    "Nothing is deleted until it's approved.")
+    assert "Reboot and check" in text(vault, "Projects/J.A.R.V.I.S.md")
+    assert asyncio.run(gate.decide(shown[0].card_id, "approve")) == \
+        "Deleted 'Reboot and check' from J.A.R.V.I.S."
+    assert "- [ ] Reboot and check" not in text(vault, "Projects/J.A.R.V.I.S.md")
+    said = asyncio.run(box.run("vault_delete_text", {"note": "Success Map", "heading": "Ideas",
+                                                     "text": "", "which": "first"}))
+    assert "approval card is up" in said and len(shown) == 2
+    asyncio.run(gate.decide(shown[1].card_id, "reject"))
+    assert "## Ideas" in text(vault, "Success Map.md")
+    # Missing: said straight away, no card; no approval screen: nothing deleted
+    assert "can't find a task" in asyncio.run(box.run("vault_delete_task", {
+        "project": "Jarvis", "task": "nonexistent thing"}))
+    assert len(shown) == 2
+    assert "approval screen" in asyncio.run(ToolBox(None, show, vault=vault).run(
+        "vault_delete_text", {"note": "Success Map", "heading": "Ideas"}))
+    assert asyncio.run(box.run("vault_move_task", {"project": "Jarvis", "task": "email",
+                                                   "section": "Next up"})).startswith("Moved")
+    assert len(shown) == 2                                   # moving needs no card
+
+
 # --- Projects ----------------------------------------------------------------------------------
 
 def test_update_project_status_progress_next_and_log(vault: Vault):
@@ -307,5 +461,6 @@ def test_vault_tools_fit_the_api_limits_and_persona_mentions_them():
     assert tool_schema_problems(REQUEST_TOOLS) == []
     names = {t["name"] for t in TOOLS}
     for name in ("vault_projects", "vault_read", "vault_add_task", "vault_update_task",
-                 "vault_update_project", "vault_new_project", "vault_add_point"):
+                 "vault_update_project", "vault_new_project", "vault_add_point",
+                 "vault_move_task", "vault_delete_task", "vault_delete_text"):
         assert name in names and name in SYSTEM_PROMPT

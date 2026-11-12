@@ -233,8 +233,11 @@ def test_reading_modules_have_no_writing_operations(module) -> None:
 def test_reading_tools_show_no_cards_and_nothing_deletes(drive: Path) -> None:
     names = {t["name"] for t in TOOLS}
     assert {"list_directory", "read_file", "search_files", "list_file_devices"} <= names
+    # Jarvis's own task list, and deleting from Sir's notes on an approval card (test_vault,
+    # test_obsidian_tools); no file tool deletes
+    allowed = {"delete_task", "vault_delete_task", "vault_delete_text", "obsidian_delete"}
     for word in ("delete", "remove", "erase"):
-        assert not any(word in n for n in names if n != "delete_task"), word
+        assert not any(word in n for n in names if n not in allowed), word
     from jarvis_brain.tools import REQUEST_TOOLS
     assert tool_schema_problems(REQUEST_TOOLS) == []
     for name in ("list_directory", "read_file", "search_files", "write_file", "edit_file",

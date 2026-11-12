@@ -15,6 +15,9 @@ notes). Code: `brain/jarvis_brain/vault.py`; tools in `tools.py`; how Jarvis use
 | "Jarvis is at 60 percent, next step is the Pi" / "Note that we chose the Jabra" | `vault_update_project` (status, progress, next step, log line) |
 | "Start a project for the workshop fit-out" | `vault_new_project` (from `Templates/Project.md`, linked from the Success Map) |
 | "Add 'laser cutter' to the ideas on the success map" | `vault_add_point` (a bullet, so a branch on that note's mind map) |
+| "Move the Pi task under Brain PC" | `vault_move_task` (with its sub-items; under a heading or another task) |
+| "Delete task 5 from Minesweeper" | `vault_delete_task` (the checkbox line and its sub-items; approval card) |
+| "Delete that second Craig's tasks heading" / "Take out the line about the case" | `vault_delete_text` (a heading with its section, or an exact passage; approval card) |
 
 ## The rules (also written in the vault's Success Map)
 
@@ -28,15 +31,23 @@ notes). Code: `brain/jarvis_brain/vault.py`; tools in `tools.py`; how Jarvis use
 
 ## Safety
 
-- Nothing is deleted: tasks are ticked off, never removed, and there's no tool to delete a note or
-  a line. Every project change is logged, so it can be put back by hand.
+- Tasks are ticked off when they're done. Jarvis deletes a task or text only when Sir asks, and
+  never a whole note. A deletion goes on an approval card showing exactly what goes; once
+  approved, the note is read again and the deletion is made only if those same lines are still
+  there (otherwise nothing changes). A task's copies (under "Next up" and "Tasks") go together
+  unless a heading picks one. Text goes as an exact passage or a whole heading with its section
+  (exact heading name only; a project's `## Log` is never deleted or swept up with a section above
+  it). Anything missing or there more than once comes back as an error listing the copies, never
+  a guess; `which` (1 = first in the note) picks a copy. Properties are never touched.
+- Moving a task (with its sub-items) loses nothing, so it runs without a card.
+- Every project change, deletions and moves included, is logged, so it can be put back by hand.
 - Only notes found inside the vault are touched (`.obsidian`, `.trash` and `.git` are skipped),
   only `.md` files are written, and a name like `../x` can't leave the `Projects` folder.
 - Sir edits in Obsidian at the same time: every call reads the file fresh, changes only the lines
   it must (properties included: the rest of the block is left as written), keeps the file's line
   endings, and replaces the file in one step, so Obsidian never sees half a file.
-- These run without an approval card, like the task lists: they only change Sir's own notes, at
-  his request, additively.
+- Apart from deleting, these run without an approval card, like the task lists: they only change
+  Sir's own notes, at his request, and nothing is lost.
 
 ## Setting it up
 
