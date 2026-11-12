@@ -22,7 +22,7 @@ from . import clock
 from .files import FileAccessError, FileReader
 from .filewrite import FileWriter
 from .graph import GraphError
-from .mail import Mailbox
+from .mail import REPLY_KIND, Mailbox
 from .tasks import TaskError, TaskStore
 from .themes import THEMES, describe
 from .vault import Vault, VaultError
@@ -505,7 +505,8 @@ _VAULT_TOOLS = {"vault_projects", "vault_read", "vault_add_task", "vault_update_
                 "vault_update_project", "vault_new_project", "vault_add_point"}
 
 # --- Sir's email (mail.py, through Microsoft Graph) ---------------------------------------------
-# Reading only for now (reading one marks it read). Email text is untrusted outside content.
+# Reading runs directly (reading one marks it read); a reply is only drafted and put on an
+# approval card, and sent once approved. Email text is untrusted outside content.
 TOOLS += [
     {
         "name": "email_inbox",
@@ -553,8 +554,22 @@ TOOLS += [
              "who": {"type": "string", "description": "Who (not for list)."}},
             ["action"]),
     },
+    {
+        "name": "email_reply",
+        "description": (
+            "Reply to one email in Sir's mailbox, e.g. 'reply to Ronan's email and say thanks "
+            "mate'. Drafts a plain-text reply to its sender in the same thread and puts up an "
+            "approval card showing who it's to, the subject and the whole reply. Nothing is "
+            "sent until Sir approves the card; if he rejects it, the draft is deleted. The email: "
+            "its number from the last email_inbox or email_search list (best), or words from the "
+            "sender's name or subject. Write the reply as Sir would, in his words, plain text."),
+        "input_schema": _schema(
+            {"email": {"type": "string", "description": "Its number, or sender or subject words."},
+             "text": {"type": "string", "description": "The whole reply, as it will be sent."}},
+            ["email", "text"]),
+    },
 ]
-_EMAIL_TOOLS = {"email_inbox", "email_read", "email_search", "email_important"}
+_EMAIL_TOOLS = {"email_inbox", "email_read", "email_search", "email_important", "email_reply"}
 
 # --- Working in Obsidian with Sir (live, through a terminal's Local REST API plugin) ------------
 # Sent to a terminal as FileRequests ("obsidian_*"); the terminal calls Obsidian on its machine
@@ -1003,6 +1018,9 @@ class ToolBox:
             return await m.inbox(True if unread is None else bool(unread), count(10))
         if name == "email_read":
             return await m.read(str(args.get("email") or ""))
+        if name == "email_reply":
+            return await self._propose_reply(str(args.get("email") or ""),
+                                             str(args.get("text") or ""))
         if name == "email_important":
             senders = getattr(m, "important", None)
             if senders is None:
@@ -1018,6 +1036,25 @@ class ToolBox:
                 return senders.unexclude(who)
             return senders.describe()
         return await m.search(str(args.get("query") or ""), count(8))
+
+    async def _propose_reply(self, ref: str, text: str) -> str:
+        """Draft the reply in Sir's mailbox and put it on an approval card; the card's action
+        sends it. A rejected card's draft is deleted (Brain.decide)."""
+        if self.approvals is None:
+            return "Replying to email needs the approval screen, which isn't here."
+        m = self.mailbox
+        await m.tidy_replies({c.card_id for c in self.approvals.pending()})
+        reply = await m.draft_reply(ref, text)
+        if isinstance(reply, str):
+            return reply
+        card = self.approvals.propose(f"Send this reply to {reply.to_names}", reply.card_body(),
+                                      m.send_action(reply), data=reply.card_data(),
+                                      kind=REPLY_KIND)
+        m.replies[card.card_id] = reply
+        await self.show_card(card)
+        return (f"[An approval card is up with the reply to {reply.to_names}, subject "
+                f"'{reply.subject}'. Nothing has been sent: it goes only if Sir approves the card. "
+                "Say you've put the card up, never that it's sent.]")
 
     def _run_vault_tool(self, name: str, args: dict) -> str:
         v = self.vault

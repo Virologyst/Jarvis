@@ -44,7 +44,7 @@ from .sentences import SentenceSplitter
 from .stt import Transcriber
 from .themes import DEFAULT_THEME, THEMES, ThemeStore, resolve
 from .graph import Graph, GraphAuth
-from .mail import Mailbox
+from .mail import REPLY_KIND, Mailbox
 from .mail_watch import ImportantSenders, MailWatcher, Sorter, parse_quiet
 from .tasks import TaskStore
 from .vault import Vault
@@ -84,7 +84,6 @@ class Brain:
         self.approvals = ApprovalGate(store=REPO_ROOT / "data" / "approvals.json")
         self.sessions: set[TerminalSession] = set()
         self.upgrades = UpgradeManager(REPO_ROOT, self.approvals, self.announce)
-        self.approvals.restore()   # after every owner of saved cards has registered
         self.themes = ThemeStore(REPO_ROOT / "data" / "themes.json")
         self.tasks = TaskStore(REPO_ROOT / "data" / "tasks.json")   # shared by every terminal
         self.vault = Vault.from_env()   # Sir's Obsidian notes (JARVIS_VAULT), if set
@@ -92,6 +91,8 @@ class Brain:
         # Sir's Microsoft 365 mailbox (graph.py); tools say so if it isn't set up or signed in
         mail_auth = GraphAuth.from_env()
         self.mailbox = Mailbox(Graph(mail_auth))
+        self.approvals.register(REPLY_KIND, self.mailbox.rebuild_reply)   # reply cards
+        self.approvals.restore()   # after every owner of saved cards has registered
         log.info("email: %s", "configured" if mail_auth.configured
                  else "not set up (JARVIS_GRAPH_CLIENT_ID, JARVIS_GRAPH_TENANT_ID)")
         # Step 2: watch the inbox and say when someone important writes (mail_watch.py)
@@ -144,6 +145,11 @@ class Brain:
     async def decide(self, card_id: str, decision: str) -> str:
         """Approve/reject a card (from a tap or a spoken word) and take it down on every screen."""
         result = await self.approvals.decide(card_id, decision)
+        # A rejected (or already expired) email reply: delete its draft. An approved one was
+        # sent by the card's action and is no longer held, so this does nothing then.
+        mailbox = getattr(self, "mailbox", None)
+        if mailbox and await mailbox.discard_reply(card_id):
+            result += " I've deleted the draft."
         await self.broadcast(CardDone(card_id))
         return result
 
