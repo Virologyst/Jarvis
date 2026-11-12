@@ -631,6 +631,55 @@ _OBSIDIAN_OPS = {"obsidian_open_note": "obsidian_active", "obsidian_read": "obsi
                  "obsidian_write": "obsidian_edit", "obsidian_show": "obsidian_open",
                  "obsidian_search": "obsidian_search", "obsidian_canvas": "obsidian_canvas"}
 
+# --- Coding: Claude Code in Sir's project folders, on the PC whose terminal runs the coder ------
+# (terminal/jarvis_terminal/coder.py). Jobs run in the background; it edits files in the project
+# by itself, and anything else it wants to do comes up as an approval card, decided in code.
+TOOLS += [
+    {
+        "name": "code_projects",
+        "description": "List Sir's project folders (PycharmProjects, WebstormProjects) that the "
+                       "coder can work in.",
+        "input_schema": _schema({}, []),
+    },
+    {
+        "name": "code_start",
+        "description": (
+            "Start a coding job: Claude Code builds or changes software in one of Sir's project "
+            "folders on his PC, in the background. Use for 'build...', 'add a feature to...', "
+            "'fix the bug in...', 'write a program that...'. new=true makes a brand new project "
+            "folder (project = its name) and builds it from scratch; where picks PycharmProjects "
+            "(Python and most things, the default) or WebstormProjects (web and JavaScript). "
+            "task: what Sir wants, in full, in his words plus anything you agreed."),
+        "input_schema": _schema(
+            {"project": {"type": "string",
+                         "description": "Project folder name, or the new project's name."},
+             "task": {"type": "string", "description": "What to build or change, in full."},
+             "new": {"type": "boolean", "description": "True to make a new project from scratch."},
+             "where": {"type": "string", "enum": ["PycharmProjects", "WebstormProjects"]}},
+            ["project", "task"]),
+    },
+    {
+        "name": "code_reply",
+        "description": ("Tell the coder more about its current or last job: a follow-up, a "
+                        "change of mind, an answer to its question ('make it blue', 'also add "
+                        "tests'). Carries on in the same project and conversation."),
+        "input_schema": _schema({"message": {"type": "string"}}, ["message"]),
+    },
+    {
+        "name": "code_status",
+        "description": "How the coding job is going: what it's doing, waiting on, or its report.",
+        "input_schema": _schema({}, []),
+    },
+    {
+        "name": "code_stop",
+        "description": "Stop the running coding job (changes it already made stay).",
+        "input_schema": _schema({}, []),
+    },
+]
+_CODER_OPS = {"code_projects": "coder_projects", "code_start": "coder_start",
+              "code_reply": "coder_reply", "code_status": "coder_status",
+              "code_stop": "coder_stop"}
+
 # The API allows at most 20 strict tools per request (and 24 optional settings across them).
 # Strict mode guarantees a tool's input matches its schema, but the API compiles all strict
 # schemas in a request together and refuses when they're too big: at most 20 strict tools, 24
@@ -677,9 +726,11 @@ class ToolBox:
                  file_terminals: Callable[[], dict[str, RemoteFiles]] | None = None,
                  vault: Vault | None = None,
                  mailbox: Mailbox | None = None,
-                 obsidian_terminals: Callable[[], dict[str, RemoteFiles]] | None = None):
+                 obsidian_terminals: Callable[[], dict[str, RemoteFiles]] | None = None,
+                 coder_terminals: Callable[[], dict[str, RemoteFiles]] | None = None):
         self.upgrades = upgrades
         self.obsidian_terminals = obsidian_terminals or dict
+        self.coder_terminals = coder_terminals or dict
         self.show_card = show_card
         self.current_theme = current_theme
         self.set_theme = set_theme
@@ -703,6 +754,8 @@ class ToolBox:
             return self._describe_devices()
         if name in _OBSIDIAN_OPS:
             return await self._run_obsidian_tool(name, args)
+        if name in _CODER_OPS:
+            return await self._run_coder_tool(name, args)
         if name in _FILE_TOOLS:
             try:
                 return await self._run_read_tool(name, args)
@@ -917,6 +970,19 @@ class ToolBox:
             clean = {k: str(v) for k, v in clean.items()}
         try:
             return await remote(_OBSIDIAN_OPS[name], clean)
+        except FileAccessError as e:
+            return str(e)
+
+    async def _run_coder_tool(self, name: str, args: dict) -> str:
+        terminals, here = self.coder_terminals(), self.terminal_id()
+        if not terminals:
+            return ("The coder isn't reachable right now: it runs on Sir's PC, through its "
+                    "terminal, with Claude Code signed in there (docs/coder.md).")
+        remote = terminals.get(here) or next(iter(terminals.values()))
+        clean = {k: (str(v).lower() if isinstance(v, bool) else str(v))
+                 for k, v in args.items() if v not in (None, "")}
+        try:
+            return await remote(_CODER_OPS[name], clean)
         except FileAccessError as e:
             return str(e)
 

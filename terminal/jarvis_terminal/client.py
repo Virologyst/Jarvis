@@ -30,7 +30,8 @@ import numpy as np
 from aiohttp import WSMsgType, web
 
 from jarvis_protocol import (
-    AudioEnd, AudioStart, Decision, Emote, FileReply, FileRequest, Hello, ListenCancel, ListenEnd,
+    AudioEnd, AudioStart, CoderDecision, Decision, Emote, FileReply, FileRequest, Hello,
+    ListenCancel, ListenEnd,
     ListenMode, ListenStart, ReplyText, SetTheme, State, Transcript, UserInput, WakeCheck,
     WakeResult, decode, encode,
 )
@@ -103,7 +104,11 @@ def _load_vad():
 class Terminal:
     def __init__(self, brain_url: str, terminal_id: str, ui_port: int,
                  wake_threshold: float, use_wake: bool, mic_device=None, speaker_device=None,
-                 eye=None, devices: DeviceChoice | None = None, files=None, obsidian=None):
+                 eye=None, devices: DeviceChoice | None = None, files=None, obsidian=None,
+                 coder=None):
+        self.coder = coder  # jarvis_terminal.coder.Coder (Claude Code in Sir's projects), or None
+        if coder is not None:
+            coder.send = self.send_to_brain
         self.eye = eye  # jarvis_terminal.eye.Eye, or None
         self.files = files  # jarvis_terminal.files.TerminalFiles (read-only), or None
         self.obsidian = obsidian  # jarvis_terminal.obsidian.ObsidianBridge, or None
@@ -146,6 +151,16 @@ class Terminal:
         self._quiet_until = 0.0         # echo guard: ignore voices until then
 
     # ---- outputs -------------------------------------------------------
+
+    async def send_to_brain(self, msg) -> None:
+        """For the coder: raises if the brain isn't connected, so it can say it later."""
+        if self.brain_ws is None or self.brain_ws.closed:
+            raise ConnectionError("not connected to the brain")
+        await self.brain_ws.send_str(encode(msg))
+
+    @property
+    def runs_coder(self) -> bool:
+        return bool(self.coder and self.coder.available)
 
     async def to_brain(self, msg) -> bool:
         if self.brain_ws is None or self.brain_ws.closed:
@@ -218,7 +233,12 @@ class Terminal:
     async def on_file_request(self, msg: FileRequest) -> None:
         """The brain wants to read something on this machine: answer it (read-only), off the
         event loop so audio keeps flowing during a long search."""
-        if msg.op.startswith("obsidian_"):
+        if msg.op.startswith("coder_"):
+            if self.runs_coder:
+                ok, text = await self.coder.handle(msg.op, msg.args)
+            else:
+                ok, text = False, "This terminal can't run coding jobs."
+        elif msg.op.startswith("obsidian_"):
             if self.obsidian and self.obsidian.available:
                 ok, text = await asyncio.to_thread(self.obsidian.handle, msg.op, msg.args)
             else:
@@ -494,7 +514,10 @@ class Terminal:
                         delay = 1.0
                         await ws.send_str(encode(Hello(
                             self.terminal_id, files=self.shares_files,
-                            obsidian=bool(self.obsidian and self.obsidian.available))))
+                            obsidian=bool(self.obsidian and self.obsidian.available),
+                            coder=self.runs_coder)))
+                        if self.runs_coder:          # anything still waiting on the brain
+                            asyncio.create_task(self.coder.reconnected())
                         if self.always_listening:   # the brain restarted: carry on, quietly
                             await ws.send_str(encode(ListenMode(True, quiet=True)))
                         await self.to_ui({"type": "connection", "connected": True})
@@ -524,6 +547,10 @@ class Terminal:
         if isinstance(msg, FileRequest):
             asyncio.create_task(self.on_file_request(msg))
             return  # nor for this
+        if isinstance(msg, CoderDecision):
+            if self.coder:
+                self.coder.decide(msg.request_id, bool(msg.allow), msg.message)
+            return
         if isinstance(msg, Emote):
             # Show it when its sentence is actually heard, not when it arrives
             delay = self.player.buffered_seconds

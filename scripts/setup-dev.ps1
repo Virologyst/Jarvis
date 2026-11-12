@@ -19,7 +19,7 @@ Write-Host "== installing protocol, brain and terminal"
 & $Py -m pip install -q --disable-pip-version-check --upgrade pip
 $Brain = "brain"
 if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) { $Brain = "brain[gpu]" }  # CUDA libs for GPU speech-to-text
-& $Py -m pip install -q --disable-pip-version-check -e protocol -e $Brain -e terminal
+& $Py -m pip install -q --disable-pip-version-check -e protocol -e $Brain -e "terminal[coder]"
 
 Write-Host "== fetching Piper voice and wake word model"
 & $Py brain\scripts\get_voice.py

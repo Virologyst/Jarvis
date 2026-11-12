@@ -17,6 +17,11 @@ dependencies = [
     "pyserial>=3.5",   # the eye's mic node on USB
 ]
 
+[project.optional-dependencies]
+# Coding jobs (Claude Code in Sir's projects, terminal/jarvis_terminal/coder.py): a Windows PC
+# with Claude Code signed in. pip install -e terminal[coder]
+coder = ["claude-agent-sdk>=0.2"]
+
 [project.scripts]
 jarvis-terminal = "jarvis_terminal.__main__:main"
 

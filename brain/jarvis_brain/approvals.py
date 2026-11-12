@@ -39,6 +39,7 @@ class _Pending:
     action: Action
     expires_at: float
     kind: str | None = None
+    on_reject: Action | None = None
 
 
 class ApprovalGate:
@@ -54,14 +55,18 @@ class ApprovalGate:
         self._rebuilders[kind] = rebuild
 
     def propose(self, title: str, body: str, action: Action, data: dict | None = None,
-                kind: str | None = None) -> Card:
+                kind: str | None = None, on_reject: Action | None = None,
+                ttl_seconds: float | None = None) -> Card:
         """Register an action awaiting approval and return the card to show.
 
         kind: lets the card survive a restart (needs a store and a registered rebuilder).
+        on_reject: run if it's rejected (its result is what's said), e.g. to tell a waiting
+        coder "no". ttl_seconds: a shorter life than the gate's default.
         """
         card = Card(card_id=uuid.uuid4().hex, kind="approval", title=title,
                     body=body, data=data or {})
-        self._pending[card.card_id] = _Pending(card, action, time.time() + self.ttl, kind)
+        self._pending[card.card_id] = _Pending(
+            card, action, time.time() + (ttl_seconds or self.ttl), kind, on_reject)
         log.info("approval requested: %s (%s)", title, card.card_id)
         self._save()
         return card
@@ -80,6 +85,8 @@ class ApprovalGate:
             return "That request has expired or was already handled."
         if decision != "approve":
             log.info("rejected: %s", pending.card.title)
+            if pending.on_reject:
+                return await pending.on_reject()
             return f"Okay, I won't {pending.card.title.lower()}."
         log.info("approved: %s", pending.card.title)
         return await pending.action()

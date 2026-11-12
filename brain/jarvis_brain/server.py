@@ -27,7 +27,8 @@ import anthropic
 from aiohttp import WSMsgType, web
 
 from jarvis_protocol import (
-    AudioEnd, AudioStart, Card, CardDone, Decision, Emote, Error, FileReply, FileRequest, Hello,
+    AudioEnd, AudioStart, Card, CardDone, CoderDecision, CoderEvent, Decision, Emote, Error,
+    FileReply, FileRequest, Hello,
     ListenCancel, ListenEnd, ListenMode, ListenStart, ReplyText, SetTheme, State, Transcript,
     UserInput, WakeCheck, WakeResult, Welcome, decode, encode,
 )
@@ -45,7 +46,7 @@ from .stt import Transcriber
 from .themes import DEFAULT_THEME, THEMES, ThemeStore, resolve
 from .graph import Graph, GraphAuth
 from .mail import Mailbox
-from .mail_watch import ImportantSenders, MailWatcher, Sorter, parse_quiet
+from .mail_watch import Announcement, ImportantSenders, MailWatcher, Sorter, parse_quiet
 from .tasks import TaskStore
 from .vault import Vault
 from .tools import REQUEST_TOOLS, ToolBox
@@ -111,6 +112,7 @@ class Brain:
                 on_announced=self.mailbox.remember_list)
         self._mail_loop: asyncio.Task | None = None
         self.reminders = ReminderService(self.tasks, self.deliver_reminder)
+        self._coder_cards: dict[str, str] = {}    # a coder's request id -> its card
         self._reminder_loop: asyncio.Task | None = None
         # Said once to the first terminal that connects: (card title, what to say)
         rolled_back = take_rollback_note(REPO_ROOT)
@@ -157,6 +159,57 @@ class Brain:
         return {s.terminal_id: s.remote_file for s in list(self.sessions)
                 if s.uses_obsidian and not s.ws.closed}
 
+    def coder_terminals(self) -> dict:
+        """Connected terminals that run coding jobs (Claude Code): name -> (op, args) -> text."""
+        return {s.terminal_id: s.remote_file for s in list(self.sessions)
+                if s.runs_coder and not s.ws.closed}
+
+    async def on_coder_event(self, terminal_id: str, event: CoderEvent) -> None:
+        """A terminal's coder wants approval for something, or finished a job."""
+        project = str(event.data.get("project") or "the project")
+        if event.kind == "permission":
+            if event.request_id in self._coder_cards:      # asked again after a reconnect
+                card_id = self._coder_cards[event.request_id]
+                card = next((c for c in self.approvals.pending() if c.card_id == card_id), None)
+                if card:
+                    await self.broadcast(card)
+                    return
+
+            async def answer(allow: bool) -> None:
+                self._coder_cards.pop(event.request_id, None)
+                for s in list(self.sessions):   # the terminal's current connection
+                    if s.terminal_id == terminal_id and not s.ws.closed:
+                        await s.send(CoderDecision(event.request_id, allow))
+
+            async def approve() -> str:
+                await answer(True)
+                return "Approved. The coder carries on."
+
+            async def refuse() -> str:
+                await answer(False)
+                return "Refused. The coder will carry on without it."
+
+            detail = str(event.data.get("detail") or "")
+            card = self.approvals.propose(
+                f"Coder: {event.text[:90]}",
+                f"Claude Code, working in {project}, wants to:\n{detail or event.text}",
+                approve, data={"coder": True, "project": project}, on_reject=refuse,
+                ttl_seconds=20 * 60)
+            self._coder_cards[event.request_id] = card.card_id
+            await self.announce(f"Sir, the coder in {project} needs your approval: "
+                                f"{event.text[:140]}.", card)
+            return
+        if event.kind in ("done", "failed"):
+            report = " ".join(event.text.split())
+            spoken = report[:500] + ("..." if len(report) > 500 else "")
+            text = (f"Sir, the coding job in {project} is finished. {spoken}" if event.kind == "done"
+                    else f"Sir, the coding job in {project} ran into trouble. {spoken}")
+            note = (f"[The coder (Claude Code on Sir's PC) finished a job in {project} "
+                    f"({event.kind}). The task: {event.data.get('task', '')}. Its full report: "
+                    f"{report[:3000]}. For more use code_status; to carry on or change "
+                    "something use code_reply.]")
+            await self.deliver_reminder(Announcement(text=text, note=note))
+
     async def broadcast(self, msg) -> None:
         for s in list(self.sessions):
             await s.send(msg)
@@ -179,6 +232,7 @@ class TerminalSession:
         s = brain.settings
         self.shares_files = False             # its Hello said the brain may read its drive
         self.uses_obsidian = False            # ... and that it reaches Obsidian on that machine
+        self.runs_coder = False               # ... and runs coding jobs (Claude Code) there
         self._file_waits: dict[str, asyncio.Future] = {}   # FileRequests awaiting a FileReply
         tools = ToolBox(brain.upgrades, self.send, current_theme=lambda: self.theme.title,
                         set_theme=self.set_theme, tasks=brain.tasks, approvals=brain.approvals,
@@ -186,6 +240,8 @@ class TerminalSession:
                         file_terminals=lambda: brain.file_terminals(),
                         obsidian_terminals=lambda: (brain.obsidian_terminals()
                                                     if hasattr(brain, "obsidian_terminals") else {}),
+                        coder_terminals=lambda: (brain.coder_terminals()
+                                                 if hasattr(brain, "coder_terminals") else {}),
                         vault=getattr(brain, "vault", None),
                         mailbox=getattr(brain, "mailbox", None))
         self.conversation = Conversation(brain.client, s.model, s.effort, s.idle_reset_minutes,
@@ -265,6 +321,9 @@ class TerminalSession:
 
     async def on_text(self, raw: str) -> None:
         msg = decode(raw)
+        if isinstance(msg, CoderEvent):
+            asyncio.create_task(self.brain.on_coder_event(self.terminal_id, msg))
+            return
         if isinstance(msg, FileReply):
             waiting = self._file_waits.get(msg.request_id)
             if waiting and not waiting.done():
@@ -274,9 +333,11 @@ class TerminalSession:
             self.terminal_id = msg.terminal_id
             self.shares_files = bool(msg.files)
             self.uses_obsidian = bool(getattr(msg, "obsidian", False))
-            log.info("terminal connected: %s%s%s", self.terminal_id,
+            self.runs_coder = bool(getattr(msg, "coder", False))
+            log.info("terminal connected: %s%s%s%s", self.terminal_id,
                      " (sharing its files, read-only)" if self.shares_files else "",
-                     " (with Obsidian)" if self.uses_obsidian else "")
+                     " (with Obsidian)" if self.uses_obsidian else "",
+                     " (runs coding jobs)" if self.runs_coder else "")
             await self.send(Welcome())
             self.theme = self.brain.themes.get(self.terminal_id)
             await self.send(SetTheme(self.theme.name))

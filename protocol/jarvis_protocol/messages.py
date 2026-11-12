@@ -15,7 +15,7 @@ __all__ = [
     "State", "Transcript", "ReplyText", "AudioStart", "AudioEnd",
     "Card", "Decision", "Error", "WakeCheck", "WakeResult",
     "UserInput", "SetTheme", "ListenMode", "Emote", "CardDone", "FileRequest", "FileReply",
-    "encode", "decode",
+    "CoderEvent", "CoderDecision", "encode", "decode",
 ]
 
 _REGISTRY: dict[str, type] = {}
@@ -35,11 +35,13 @@ def _message(type_name: str):
 @dataclass
 class Hello:
     """files: this terminal lets the brain read its drive (FileRequest), read-only.
-    obsidian: it answers "obsidian_*" FileRequests through Obsidian's Local REST API plugin."""
+    obsidian: it answers "obsidian_*" FileRequests through Obsidian's Local REST API plugin.
+    coder: it answers "coder_*" FileRequests by running Claude Code in Sir's project folders."""
     terminal_id: str
     protocol: int = 1
     files: bool = False
     obsidian: bool = False
+    coder: bool = False
 
 
 @_message("listen_start")
@@ -122,7 +124,29 @@ class FileReply:
     text: str = ""
 
 
+@_message("coder_event")
+@dataclass
+class CoderEvent:
+    """From a terminal's coder (Claude Code in Sir's projects). kind: 'permission' (it wants to
+    do something risky: request_id is answered by a CoderDecision), 'done' or 'failed' (text is
+    its report). data: project, tool, detail, task."""
+    job_id: str
+    kind: str
+    text: str = ""
+    request_id: str = ""
+    data: dict[str, Any] = field(default_factory=dict)
+
+
 # --- brain -> terminal ---------------------------------------------------
+
+@_message("coder_decision")
+@dataclass
+class CoderDecision:
+    """Sir's answer to a coder's permission request (from its approval card)."""
+    request_id: str
+    allow: bool
+    message: str = ""
+
 
 @_message("welcome")
 @dataclass

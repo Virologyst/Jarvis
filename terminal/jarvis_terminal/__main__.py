@@ -69,6 +69,11 @@ def main() -> None:
     if obsidian.available:
         logging.getLogger(__name__).info("Jarvis can work in Obsidian here (Local REST API at %s)",
                                          obsidian.url)
+    from .coder import Coder
+    coder = Coder(send=None)      # the terminal plugs in its link to the brain
+    if coder.available:
+        logging.getLogger(__name__).info("Jarvis can run coding jobs here (Claude Code in %s)",
+                                         ", ".join(str(r) for r in coder.roots))
     eye = None
     if not args.no_eye:
         from .eye import Eye
@@ -76,7 +81,7 @@ def main() -> None:
     terminal = Terminal(
         brain_url=args.brain, terminal_id=args.id, ui_port=args.ui_port,
         wake_threshold=args.wake_threshold, use_wake=not args.no_wake,
-        eye=eye, devices=devices, files=files, obsidian=obsidian,
+        eye=eye, devices=devices, files=files, obsidian=obsidian, coder=coder,
     )
     keyboard = not args.no_keyboard and sys.stdin is not None and sys.stdin.isatty()
     if keyboard:
