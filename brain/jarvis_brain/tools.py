@@ -700,6 +700,20 @@ TOOLS += [
             ["action", "text"]),
     },
     {
+        "name": "obsidian_new_project",
+        "description": (
+            "Start a new project in Sir's Obsidian vault, live: a note in Projects/ made from his "
+            "project template (progress bar, mind map, status, tasks, log), linked from the "
+            "Success Map and opened on his screen. Then fill it in with him using obsidian_write "
+            "(under its headings) and obsidian_project (progress, status, next step)."),
+        "input_schema": _schema(
+            {"name": {"type": "string", "description": "The project's name."},
+             "about": {"type": "string", "description": "What it is, in a sentence."},
+             "status": {"type": "string",
+                        "enum": ["idea", "planned", "active", "on hold", "done"]}},
+            ["name"]),
+    },
+    {
         "name": "obsidian_project",
         "description": (
             "Update a project note live in Obsidian: its progress percentage (the coloured bar "
@@ -795,6 +809,7 @@ TOOLS += [
 # tool name -> the terminal's op
 _OBSIDIAN_OPS = {"obsidian_open_note": "obsidian_active", "obsidian_read": "obsidian_read",
                  "obsidian_write": "obsidian_edit", "obsidian_project": "obsidian_project",
+                 "obsidian_new_project": "obsidian_new_project",
                  "obsidian_delete": "obsidian_delete",
                  "obsidian_show": "obsidian_open",
                  "obsidian_search": "obsidian_search", "obsidian_canvas": "obsidian_canvas"}

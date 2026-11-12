@@ -393,3 +393,30 @@ def test_delete_previews_then_deletes_only_what_the_card_showed():
     ok, text = b.handle("obsidian_delete", {"note": "Project Minesweeper", "text": "nowhere",
                                             "preview": True})
     assert not ok and "can't find" in text
+
+
+def test_new_project_from_the_template_linked_from_the_map():
+    template = ("---\ntype: project\nstatus: planned\nprogress: 0\nstarted: {{date}}\n---\n%%\n"
+                "HOW TO FILL THIS IN\nsteps\n%%\n# {{title}}\n"
+                '<div class="jarvis-progress" title="0% done"></div>\n\n'
+                'What it is and what "done" looks like, in a sentence or two. Back to the '
+                "[[V Source Development Success Map]] · code: <repo link or folder path>.\n\n"
+                "## Log\n- {{date}}: Project started.\n")
+    success = "# Map\n## Projects\n- [[J.A.R.V.I.S]]: J\n\n## Tracker\nx\n"
+    b, fake = bridge(files={"Templates/Project.md": template,
+                            "V Source Development Success Map.md": success})
+    ok, text = b.handle("obsidian_new_project", {"name": "Me", "status": "active",
+                                                 "about": "Everything Sir has to do"})
+    assert ok and text.startswith("Made the project note Projects/Me.md from the template, "
+                                  "linked it from the Success Map, and opened it.")
+    note = fake.files["Projects/Me.md"]
+    assert "HOW TO" not in note and "{{" not in note and "<repo link" not in note
+    assert "# Me\n" in note and "status: active\n" in note
+    assert "Everything Sir has to do. Back to the [[V Source Development Success Map]]." in note
+    assert 'class="jarvis-progress" title="0% done"' in note and "width:0%" in note
+    assert fake.files["V Source Development Success Map.md"] == (
+        "# Map\n## Projects\n- [[J.A.R.V.I.S]]: J\n- [[Me]]: everything Sir has to do\n\n"
+        "## Tracker\nx\n")
+    assert ("POST", "/open/Projects/Me.md") in [(c[0], c[1]) for c in fake.calls]
+    ok, text = b.handle("obsidian_new_project", {"name": "me"})
+    assert not ok and "already a project note called me" in text

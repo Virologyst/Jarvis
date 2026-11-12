@@ -6,7 +6,9 @@ JARVIS_OBSIDIAN_KEY). Going through Obsidian, rather than writing files, means J
 which note is open, open notes on screen, and edit a note Sir has open without clobbering it.
 
 Ops (args): obsidian_active, obsidian_read (note, heading), obsidian_edit (note, action, heading,
-text), obsidian_project (note, progress, status, next, log_entry: a project note's properties,
+text), obsidian_new_project (name, about, status: a project note from Templates/Project.md,
+linked from the Success Map), obsidian_project (note, progress, status, next, log_entry: a
+project note's properties,
 its coloured progress bar and log), obsidian_delete (note, text, heading, which, preview,
 expect), obsidian_open (note), obsidian_search (query), obsidian_canvas (canvas, cards, links,
 edit_cards, remove_cards, edit_links, remove_links, preview).
@@ -32,6 +34,54 @@ from jarvis_protocol.progress import refresh_bar
 
 log = logging.getLogger(__name__)
 STATUSES = ("idea", "planned", "active", "on hold", "done")
+TEMPLATE = "Templates/Project.md"
+DEFAULT_TEMPLATE = """---
+type: project
+status: planned
+progress: 0
+next:
+started: {{date}}
+updated: {{date}}
+tags:
+  - project
+---
+# {{title}}
+<div class="jarvis-progress"></div>
+
+What it is and what "done" looks like, in a sentence or two. Back to the [[V Source Development Success Map]].
+
+## Next up
+
+## Tasks
+
+## Notes
+
+## Log
+- {{date}}: Project started.
+"""
+
+
+def fill_template(template: str, name: str, about: str, status: str, today: str) -> str:
+    """The project template made into a new note: name and dates in, the "how to fill this in"
+    block (for people writing a note by hand) out, Sir's description in place of the
+    placeholder, the status set and the progress bar drawn."""
+    text = template.replace("\r\n", "\n")
+    text = text.replace("{{title}}", name).replace("{{date}}", today).replace("{{time}}", "")
+    text = re.sub(r"(?ms)^%%\s*\nHOW TO FILL THIS IN.*?^%%\s*\n", "", text, count=1)
+    text = text.replace(" · code: <repo link or folder path>", "")
+    if about:
+        text = re.sub(r'(?m)^What it is and what "done" looks like, in a sentence or two\.',
+                      lambda _: about.rstrip(".") + ".", text, count=1)
+    parts = _front(text)
+    if parts:
+        front, body = parts
+        if status.strip():
+            want = status.strip().lower()
+            if want not in STATUSES:
+                raise ObsidianError(f"Status can be {', '.join(STATUSES)}.")
+            front = _set_prop(front, "status", want)
+        text = "---\n" + front + "---\n" + refresh_bar(body, _get_prop(front, "progress") or 0)
+    return text
 
 DEFAULT_URL = "https://127.0.0.1:27124"
 TIMEOUT_S = 8.0
@@ -696,6 +746,55 @@ class ObsidianBridge:
                                       **({"If-Match": tag} if tag else {})})
         log.info("obsidian: deleted %s from %s", label, path)
         return f"Deleted {label} from {path}."
+
+    def op_new_project(self, name: str, about: str = "", status: str = "") -> str:
+        """A new project note in Projects/ from the vault's project template (Templates/Project.md),
+        linked from the Success Map's Projects list, and opened on Sir's screen."""
+        clean = " ".join(re.sub(r'[<>:"/\\|?*#^\[\]]+', " ", name or "").split()).strip(" .")
+        if not clean:
+            raise ObsidianError("What's the project called?")
+        path = f"Projects/{clean}.md"
+        files = self._all_files()
+        if any(f.lower() == path.lower() for f in files):
+            raise ObsidianError(f"There's already a project note called {clean}.")
+        try:
+            template = self._call("GET", "/vault/" + self._q(TEMPLATE),
+                                  headers={"Accept": "text/markdown"})
+        except ObsidianError:
+            template = DEFAULT_TEMPLATE
+        text = fill_template(template, clean, " ".join(str(about).split()), status,
+                             date.today().isoformat())
+        self._call("PUT", "/vault/" + self._q(path), text, {"Content-Type": "text/markdown"})
+        self._files = None
+        linked = self._link_project(clean, " ".join(str(about).split()))
+        try:
+            self._call("POST", "/open/" + self._q(path))
+        except ObsidianError:
+            pass
+        return (f"Made the project note {path} from the template" +
+                (", linked it from the Success Map" if linked else "") +
+                ", and opened it. Its sections are ready to fill in with Sir.")
+
+    def _link_project(self, name: str, about: str) -> bool:
+        """Add "- [[name]]: about" to the end of the Success Map's Projects list."""
+        maps = [f for f in self._all_files() if f.lower().endswith("success map.md")]
+        if len(maps) != 1:
+            return False
+        api = "/vault/" + self._q(maps[0])
+        current, info = self._exchange("GET", api, headers={"Accept": "text/markdown"})
+        if f"[[{name}]]".lower() in current.lower():
+            return True
+        line = f"- [[{name}]]" + (f": {about[0].lower() + about[1:]}" if about else "")
+        updated = insert(current, line, ["Projects"], at_top=False) or \
+            current.rstrip("\n") + f"\n\n## Projects\n{line}\n"
+        tag = info.get("etag")
+        try:
+            self._call("PUT", api, updated, {"Content-Type": "text/markdown",
+                                             **({"If-Match": tag} if tag else {})})
+            return True
+        except ObsidianError as e:
+            log.warning("obsidian: couldn't link %s from the Success Map: %s", name, e)
+            return False
 
     def op_open(self, note: str) -> str:
         path = self.resolve(note)

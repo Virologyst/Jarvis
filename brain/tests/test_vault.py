@@ -173,7 +173,7 @@ def test_read_any_note_and_a_section(vault: Vault):
 
 
 def test_not_set_up(tmp_path: Path):
-    with pytest.raises(VaultError, match="isn't connected"):
+    with pytest.raises(VaultError, match="isn't on the brain PC"):
         Vault(None).projects()
     with pytest.raises(VaultError, match="can't reach"):
         Vault(tmp_path / "missing").projects()

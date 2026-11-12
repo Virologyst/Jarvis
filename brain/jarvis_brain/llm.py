@@ -13,7 +13,10 @@ from .persona import SYSTEM_PROMPT
 log = logging.getLogger(__name__)
 
 REFUSAL_LINE = "Sorry, I can't help with that one."
-MAX_TOOL_ROUNDS = 6   # tool calls per spoken turn, as a runaway guard
+MAX_TOOL_ROUNDS = 12  # tool calls per spoken turn, as a runaway guard
+# Said when a turn hits that guard, so Jarvis never just goes quiet; "carry on" picks it up
+OUT_OF_STEPS_LINE = ("[concerned] That's taking more steps than I'm allowed in one go, Sir. "
+                     "Say carry on and I'll pick it up where I stopped.")
 
 
 class Conversation:
@@ -106,6 +109,10 @@ class Conversation:
                     return
                 self.messages.append({"role": "user", "content": await self._run_tools(final)})
             log.warning("gave up after %d tool rounds", MAX_TOOL_ROUNDS)
+            # The history ends with tool results: close the turn with what's said, so the next
+            # turn ("carry on") follows on properly
+            self.messages.append({"role": "assistant", "content": OUT_OF_STEPS_LINE})
+            yield OUT_OF_STEPS_LINE
         except BaseException:
             del self.messages[turn_start:]  # drop the unfinished turn (also on cancel/barge-in)
             raise

@@ -335,8 +335,11 @@ class Vault:
 
     def _need(self) -> Path:
         if self.root is None:
-            raise VaultError("The notes vault isn't connected yet: JARVIS_VAULT needs setting in "
-                             "the brain's .env.")
+            raise VaultError("The vault isn't on the brain PC, so the vault_ tools can't reach it. "
+                             "Use the obsidian_ tools instead, which work live in Obsidian on "
+                             "Sir's PC: obsidian_new_project for a new project, obsidian_project "
+                             "for progress, status and log, obsidian_read and obsidian_write for "
+                             "notes and tasks.")
         if not self.root.is_dir():
             raise VaultError(f"I can't reach the notes vault at the moment ({self.root}).")
         return self.root
