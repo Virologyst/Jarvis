@@ -45,7 +45,7 @@ unplugged falls back to the system default until it's back. Useful flags: `--no-
 only), `--list-devices`, `--mic <name>` / `--speaker <name>` (for this run), `-v` for debug logs.
 
 To keep a Windows PC's terminal running whenever you're signed in (no window; restarted if it
-stops; output in `logs	erminal.log`), point it at the brain in `.env` (`JARVIS_BRAIN_URL`) and run
+stops; output in `logs\terminal.log`), point it at the brain in `.env` (`JARVIS_BRAIN_URL`) and run
 `powershell -ExecutionPolicy Bypass -File scripts\install-terminal.ps1` (`-Uninstall` removes it).
 
 ## Set up the brain PC (starts at boot, no login needed)
