@@ -21,7 +21,7 @@ touchscreen, talk normally, and Jarvis (Claude) answers out loud.
 | `ui/` | The touchscreen page (the eye — tap it to talk — conversation, approval cards) | served by a terminal |
 | `firmware/` | ESP32-S3 mic node that tells the eye where sound is coming from ([docs/eye.md](docs/eye.md)) | the node |
 | `pi/` | Pi install, kiosk autostart, restart/stop helpers | Pi 5 |
-| `scripts/` | Dev-machine setup | dev PC |
+| `scripts/` | Dev-machine setup, terminal autostart | dev PC |
 | `docs/` | [Architecture and decisions](docs/architecture.md), [the eye](docs/eye.md), [self-upgrade](docs/self-upgrade.md), [Obsidian vault](docs/vault.md), [working in Obsidian](docs/obsidian.md), [email](docs/email.md) | |
 
 Each part has its own `pyproject.toml`, so a Pi installs only `protocol` + `terminal`
@@ -43,6 +43,10 @@ terminal window. Pick the microphone and speaker with the 🎧 button at the top
 switches straight away and is remembered (`data/audio-devices.json`); a chosen device that's
 unplugged falls back to the system default until it's back. Useful flags: `--no-wake` (button
 only), `--list-devices`, `--mic <name>` / `--speaker <name>` (for this run), `-v` for debug logs.
+
+To keep a Windows PC's terminal running whenever you're signed in (no window; restarted if it
+stops; output in `logs	erminal.log`), point it at the brain in `.env` (`JARVIS_BRAIN_URL`) and run
+`powershell -ExecutionPolicy Bypass -File scripts\install-terminal.ps1` (`-Uninstall` removes it).
 
 ## Set up the brain PC (starts at boot, no login needed)
 
