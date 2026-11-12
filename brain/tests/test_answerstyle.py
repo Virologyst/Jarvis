@@ -34,6 +34,6 @@ def test_remembered_per_screen(tmp_path):
 
 
 def test_prompt_asks_for_pointed_answers():
-    assert "Lead with the answer itself" in SYSTEM_PROMPT
+    assert "leading with the answer itself" in SYSTEM_PROMPT
     assert "never repeat his question" in SYSTEM_PROMPT
     assert "detailed" in DETAILED_NOTE and DETAILED_NOTE.startswith("\n\n(")
