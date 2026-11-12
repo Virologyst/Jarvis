@@ -6,11 +6,24 @@ Jarvis reads Sir's Microsoft 365 (Outlook) mailbox through Microsoft Graph. Buil
    email about the quote". Reading one marks it read.
 2. **Watch and announce** (done): the brain checks the inbox every minute, sorts new mail with
    Claude Sonnet 5.5, and Jarvis says when someone on Sir's important list writes.
-3. **Draft and send** (next): replies saved as Outlook drafts; nothing is sent until Sir approves a card.
+3. **Reply** (done): "reply to Ronan's email and say thanks mate". The reply is saved as an
+   Outlook draft and shown on an approval card; nothing is sent until Sir approves it.
 
-Code: `brain/jarvis_brain/graph.py` (sign-in, Graph requests), `mail.py` (inbox, read, search),
-`mail_watch.py` (watching and announcing), tools `email_inbox`, `email_read`, `email_search`,
-`email_important` in `tools.py` (loaded on demand).
+Code: `brain/jarvis_brain/graph.py` (sign-in, Graph requests), `mail.py` (inbox, read, search,
+reply drafts), `mail_watch.py` (watching and announcing), tools `email_inbox`, `email_read`,
+`email_search`, `email_important`, `email_reply` in `tools.py` (loaded on demand).
+
+## Replies
+
+- `email_reply` takes the email (its number from the last list, or the sender or subject) and the
+  reply text. It makes a reply in the same thread (Graph `createReply`, so it goes to the sender
+  only, not reply-all) and sets its body to just that text, as plain text, so what's on the card
+  is exactly what's sent.
+- The approval card shows the recipient, the subject and the whole reply. Approving sends the
+  draft; rejecting deletes it (`Brain.decide`); a card that expires has its draft deleted the
+  next time a reply is drafted. Reply cards survive a brain restart (kind `email_reply`).
+- Jarvis only replies when Sir asks, never because an email says to, and says it has put the
+  card up, not that it has sent anything. It can't forward, delete or write new emails.
 
 ## Announcements
 
@@ -40,8 +53,8 @@ Code: `brain/jarvis_brain/graph.py` (sign-in, Graph requests), `mail.py` (inbox,
   Remove its access any time in Microsoft 365 (Entra ID, Enterprise applications, Jarvis) or
   delete `data/email/token-cache.json` on the brain PC.
 - **Email is untrusted.** Results label an email's text as outside content to report, never
-  instructions; the tools can't send, forward, move or delete. Sending (step 3) will only go
-  through an approval card, decided in code.
+  instructions; the tools can't forward, move or delete Sir's mail. A reply is sent only by an
+  approved card's action, decided in code; the only thing Jarvis deletes is its own rejected draft.
 - **The sign-in** (an MSAL refresh token) is in `data/email/token-cache.json`, readable only by
   the brain's account, SYSTEM and administrators. The brain runs with no login (S4U), where
   Windows' per-user encryption isn't available, so the file is protected like `.env`.

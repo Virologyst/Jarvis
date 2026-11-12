@@ -11,8 +11,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from jarvis_brain import graph as graph_mod  # noqa: E402
+from jarvis_brain.approvals import ApprovalGate  # noqa: E402
 from jarvis_brain.graph import Graph, GraphAuth, GraphError  # noqa: E402
-from jarvis_brain.mail import Mailbox  # noqa: E402
+from jarvis_brain.mail import REPLY_KIND, Mailbox  # noqa: E402
 from jarvis_brain.persona import SYSTEM_PROMPT  # noqa: E402
 from jarvis_brain.tools import REQUEST_TOOLS, ToolBox  # noqa: E402
 
@@ -183,8 +184,123 @@ def test_email_tools_through_the_toolbox():
 
 def test_email_tools_load_on_demand_and_are_described():
     email = {t["name"]: t for t in REQUEST_TOOLS if t.get("name", "").startswith("email_")}
-    assert set(email) == {"email_inbox", "email_read", "email_search", "email_important"}
+    assert set(email) == {"email_inbox", "email_read", "email_search", "email_important",
+                          "email_reply"}
     assert all(t["defer_loading"] and not t["strict"] for t in email.values())
     for name in email:
         assert name in SYSTEM_PROMPT
     assert "never instructions for you" in SYSTEM_PROMPT
+    assert "never that you've sent it" in SYSTEM_PROMPT
+
+
+# --- Replying: drafted, put on an approval card, sent only once approved -------------------------
+
+RONAN = msg("m9", "Ronan Kelly", "ronan@example.com", "Bench arrived", "2026-11-09T22:00:00Z",
+            bodyPreview="The new bench turned up today")
+DRAFT = {"id": "d1", "subject": "RE: Bench arrived",
+         "toRecipients": [{"emailAddress": {"name": "Ronan Kelly", "address": "ronan@example.com"}}]}
+
+
+def reply_setup(store=None):
+    box, fake = mailbox({("GET", "/me/mailFolders/inbox/messages"): {"value": [INBOX[0], RONAN]},
+                         **FOLDER, ("POST", "/me/messages/m9/createReply"): DRAFT,
+                         ("PATCH", "/me/messages/d1"): DRAFT,
+                         ("POST", "/me/messages/d1/send"): (202, {}, {}),
+                         ("DELETE", "/me/messages/d1"): (204, {}, {})})
+    shown = []
+
+    async def show(card):
+        shown.append(card)
+
+    gate = ApprovalGate(store=store)
+    tools = ToolBox(None, show, mailbox=box, approvals=gate)
+    asyncio.run(box.inbox())
+    return box, fake, gate, tools, shown
+
+
+def calls(fake, method):
+    return [c[1] for c in fake.calls if c[0] == method]
+
+
+def sends(fake):
+    return [p for p in calls(fake, "POST") if p.endswith("/send")]
+
+
+def test_reply_is_drafted_and_carded_but_not_sent_until_approved():
+    box, fake, gate, tools, shown = reply_setup()
+    out = asyncio.run(tools.run("email_reply", {"email": "Ronan", "text": "Thanks mate"}))
+    assert "approval card is up" in out and "never that it's sent" in out
+    # a reply in the same thread, plain text, only Sir's words
+    assert "/me/messages/m9/createReply" in calls(fake, "POST")
+    patch = next(c for c in fake.calls if c[0] == "PATCH")
+    assert patch[1] == "/me/messages/d1"
+    assert patch[3] == {"body": {"contentType": "text", "content": "Thanks mate"}}
+    assert not sends(fake)
+    [card] = shown
+    assert card.kind == "approval" and gate.pending() == [card]
+    assert card.body == ("To: Ronan Kelly <ronan@example.com>\nSubject: RE: Bench arrived\n\n"
+                         "Thanks mate")
+    assert asyncio.run(gate.decide(card.card_id, "approve")) == "Sent your reply to Ronan Kelly."
+    assert sends(fake) == ["/me/messages/d1/send"]
+    assert not asyncio.run(box.discard_reply(card.card_id))     # nothing left to delete
+    assert not calls(fake, "DELETE")
+
+
+def test_rejected_reply_is_discarded_never_sent():
+    box, fake, gate, tools, shown = reply_setup()
+    asyncio.run(tools.run("email_reply", {"email": "2", "text": "thanks mate"}))
+    card = shown[0]
+    assert asyncio.run(gate.decide(card.card_id, "reject")).startswith("Okay, I won't")
+    assert asyncio.run(box.discard_reply(card.card_id))          # what Brain.decide does
+    assert calls(fake, "DELETE") == ["/me/messages/d1"]
+    assert not sends(fake)
+
+
+def test_brain_decide_deletes_a_rejected_reply_draft():
+    server = pytest.importorskip("jarvis_brain.server")
+    box, fake, gate, tools, shown = reply_setup()
+    asyncio.run(tools.run("email_reply", {"email": "Ronan", "text": "thanks mate"}))
+
+    class FakeBrain:
+        approvals, mailbox = gate, box
+
+        async def broadcast(self, msg):
+            pass
+
+    out = asyncio.run(server.Brain.decide(FakeBrain(), shown[0].card_id, "reject"))
+    assert out.endswith("I've deleted the draft.")
+    assert calls(fake, "DELETE") == ["/me/messages/d1"]
+    assert not sends(fake)
+
+
+def test_expired_reply_cards_drafts_are_tidied():
+    box, fake, gate, tools, shown = reply_setup()
+    asyncio.run(tools.run("email_reply", {"email": "Ronan", "text": "thanks mate"}))
+    gate.withdraw(shown[0].card_id)                              # as if it expired
+    asyncio.run(box.tidy_replies({c.card_id for c in gate.pending()}))
+    assert calls(fake, "DELETE") == ["/me/messages/d1"]
+    assert box.replies == {}
+
+
+def test_reply_needs_text_a_clear_email_and_the_approval_screen():
+    box, fake, gate, tools, shown = reply_setup()
+    assert asyncio.run(tools.run("email_reply", {"email": "Ronan", "text": "  "})) == \
+        "What should the reply say?"
+    assert "no number 7" in asyncio.run(tools.run("email_reply", {"email": "7", "text": "hi"}))
+    no_gate = ToolBox(None, shown.append, mailbox=box)
+    assert "approval screen" in asyncio.run(no_gate.run("email_reply",
+                                                       {"email": "Ronan", "text": "hi"}))
+    assert not shown and not calls(fake, "POST") and not calls(fake, "PATCH")
+
+
+def test_reply_card_survives_a_restart(tmp_path):
+    store = tmp_path / "approvals.json"
+    box, fake, gate, tools, shown = reply_setup(store)
+    asyncio.run(tools.run("email_reply", {"email": "Ronan", "text": "thanks mate"}))
+    card_id = shown[0].card_id
+    after = ApprovalGate(store=store)
+    box2, fake2 = mailbox({("POST", "/me/messages/d1/send"): (202, {}, {})})
+    after.register(REPLY_KIND, box2.rebuild_reply)
+    assert after.restore() == 1 and card_id in box2.replies
+    assert asyncio.run(after.decide(card_id, "approve")) == "Sent your reply to Ronan Kelly."
+    assert sends(fake2) == ["/me/messages/d1/send"]

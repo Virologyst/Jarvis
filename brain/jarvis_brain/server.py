@@ -45,10 +45,11 @@ from .sentences import SentenceSplitter
 from .stt import Transcriber
 from .themes import DEFAULT_THEME, THEMES, ThemeStore, resolve
 from .graph import Graph, GraphAuth
-from .mail import Mailbox
+from .mail import REPLY_KIND, Mailbox
 from .mail_watch import Announcement, ImportantSenders, MailWatcher, Sorter, parse_quiet
 from .tasks import TaskStore
 from .vault import Vault
+from .web import KEY_VAR as WEB_KEY_VAR, WebAccess
 from .tools import REQUEST_TOOLS, ToolBox
 from .tts import make_speaker
 from .voicecommands import parse_voice_decision, pick_card
@@ -85,7 +86,6 @@ class Brain:
         self.approvals = ApprovalGate(store=REPO_ROOT / "data" / "approvals.json")
         self.sessions: set[TerminalSession] = set()
         self.upgrades = UpgradeManager(REPO_ROOT, self.approvals, self.announce)
-        self.approvals.restore()   # after every owner of saved cards has registered
         self.themes = ThemeStore(REPO_ROOT / "data" / "themes.json")
         self.tasks = TaskStore(REPO_ROOT / "data" / "tasks.json")   # shared by every terminal
         self.vault = Vault.from_env()   # Sir's Obsidian notes (JARVIS_VAULT), if set
@@ -93,6 +93,8 @@ class Brain:
         # Sir's Microsoft 365 mailbox (graph.py); tools say so if it isn't set up or signed in
         mail_auth = GraphAuth.from_env()
         self.mailbox = Mailbox(Graph(mail_auth))
+        self.approvals.register(REPLY_KIND, self.mailbox.rebuild_reply)   # reply cards
+        self.approvals.restore()   # after every owner of saved cards has registered
         log.info("email: %s", "configured" if mail_auth.configured
                  else "not set up (JARVIS_GRAPH_CLIENT_ID, JARVIS_GRAPH_TENANT_ID)")
         # Step 2: watch the inbox and say when someone important writes (mail_watch.py)
@@ -111,6 +113,10 @@ class Brain:
                 quiet=parse_quiet(os.environ.get("JARVIS_EMAIL_QUIET", "22:00-07:00")),
                 on_announced=self.mailbox.remember_list)
         self._mail_loop: asyncio.Task | None = None
+        # The internet (web.py): reading pages always works; searching needs a Brave key
+        self.web = WebAccess.from_env()
+        log.info("web search: %s", "configured" if self.web.search_configured
+                 else f"not set up ({WEB_KEY_VAR})")
         self.reminders = ReminderService(self.tasks, self.deliver_reminder)
         self._coder_cards: dict[str, str] = {}    # a coder's request id -> its card
         self._reminder_loop: asyncio.Task | None = None
@@ -133,6 +139,7 @@ class Brain:
                 loop.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await loop
+        await self.web.close()
 
     async def deliver_reminder(self, due) -> bool:
         """Say a task reminder (or an email announcement) on every terminal, each as soon as
@@ -146,6 +153,11 @@ class Brain:
     async def decide(self, card_id: str, decision: str) -> str:
         """Approve/reject a card (from a tap or a spoken word) and take it down on every screen."""
         result = await self.approvals.decide(card_id, decision)
+        # A rejected (or already expired) email reply: delete its draft. An approved one was
+        # sent by the card's action and is no longer held, so this does nothing then.
+        mailbox = getattr(self, "mailbox", None)
+        if mailbox and await mailbox.discard_reply(card_id):
+            result += " I've deleted the draft."
         await self.broadcast(CardDone(card_id))
         return result
 
@@ -243,7 +255,8 @@ class TerminalSession:
                         coder_terminals=lambda: (brain.coder_terminals()
                                                  if hasattr(brain, "coder_terminals") else {}),
                         vault=getattr(brain, "vault", None),
-                        mailbox=getattr(brain, "mailbox", None))
+                        mailbox=getattr(brain, "mailbox", None),
+                        web=getattr(brain, "web", None))
         self.conversation = Conversation(brain.client, s.model, s.effort, s.idle_reset_minutes,
                                          tools=REQUEST_TOOLS, run_tool=tools.run)
         self.listening = False

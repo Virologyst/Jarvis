@@ -1,10 +1,10 @@
 """Text to speech: Kokoro (natural, the default) or Piper (lighter, more robotic). Both run locally.
 
-JARVIS_VOICE picks the voice:
-  kokoro:bm_daniel                         one Kokoro voice
-  kokoro:bm_daniel=0.65,bm_lewis=0.35      a blend of Kokoro voices
+JARVIS_VOICE picks the voice (default and candidates: DEFAULT_VOICE in config.py):
+  kokoro:bm_george                         one Kokoro voice
+  kokoro:bm_george=0.75,bm_lewis=0.25      a blend of Kokoro voices
   voices/en_GB-alan-medium.onnx            a Piper voice file
-JARVIS_VOICE_SPEED sets the pace for Kokoro (1.0 = normal, 1.12 = 12% faster).
+JARVIS_VOICE_SPEED sets the pace for Kokoro (1.0 = normal, 0.95 = 5% slower).
 """
 
 from __future__ import annotations

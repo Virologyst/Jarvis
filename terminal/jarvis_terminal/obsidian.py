@@ -6,7 +6,8 @@ JARVIS_OBSIDIAN_KEY). Going through Obsidian, rather than writing files, means J
 which note is open, open notes on screen, and edit a note Sir has open without clobbering it.
 
 Ops (args): obsidian_active, obsidian_read (note, heading), obsidian_edit (note, action, heading,
-text), obsidian_open (note), obsidian_search (query), obsidian_canvas (canvas, cards, links).
+text), obsidian_open (note), obsidian_search (query), obsidian_canvas (canvas, cards, links,
+edit_cards, remove_cards, edit_links, remove_links, preview).
 A note is a vault path ("Projects/J.A.R.V.I.S.md"), a name ("J.A.R.V.I.S"), or "" for the note
 open now. Headings are "Parent > Child". Everything answers (ok, text) for Jarvis to use.
 Only 127.0.0.1 is ever called: the plugin's certificate is its own, so it isn't checked.
@@ -97,6 +98,192 @@ def insert(text: str, new: str, path: list[str], at_top: bool) -> str | None:
 
 def headings(text: str) -> list[str]:
     return [m.group(2).strip() for m in re.finditer(r"^(#{1,6})\s+(.*?)\s*#*\s*$", text, re.M)]
+
+
+# --- Changing canvas boards ---------------------------------------------------------------------
+# Obsidian's preset card colours are "1" to "6"; any "#rrggbb" works too.
+COLOURS = {"red": "1", "orange": "2", "yellow": "3", "green": "4", "cyan": "5", "blue": "5",
+           "teal": "5", "purple": "6", "violet": "6"}
+COLOUR_NAMES = {"1": "red", "2": "orange", "3": "yellow", "4": "green", "5": "cyan", "6": "purple"}
+NO_COLOUR = {"none", "no colour", "no color", "default", "clear", "remove", "plain"}
+
+
+def _words(text: str) -> str:
+    return " ".join(str(text).split()).lower()
+
+
+def card_name(n: dict) -> str:
+    """What a card shows: its text, file, web address or group label."""
+    return str(n.get("text") or n.get("file") or n.get("url") or n.get("label") or "").strip()
+
+
+def _show(n: dict) -> str:
+    name = " ".join(card_name(n).split())
+    name = name if len(name) <= 60 else name[:57] + "..."
+    what = f'"{name}"' if name else f"an empty {n.get('type', '')} card"
+    return f"{what} (id {n.get('id')})"
+
+
+def find_card(nodes: list, ref) -> dict:
+    """The card meant by an id, its exact text, or a part of its text only one card has."""
+    want = _words(ref or "")
+    if not want:
+        raise ObsidianError("Which card? Give its text or id.")
+    cards = [n for n in nodes if isinstance(n, dict)]
+    for pool in ([n for n in cards if str(n.get("id", "")).lower() == want],
+                 [n for n in cards if _words(card_name(n)) == want],
+                 [n for n in cards if want in _words(card_name(n))]):
+        if len(pool) == 1:
+            return pool[0]
+        if pool:
+            raise ObsidianError(f'Several cards match "{ref}": '
+                                + ", ".join(_show(n) for n in pool[:10]) + ". Which one?")
+    raise ObsidianError(f'No card matches "{ref}". The cards are: '
+                        + (", ".join(_show(n) for n in cards[:15]) or "none")
+                        + (" and more" if len(cards) > 15 else "") + ".")
+
+
+def _show_link(e: dict, nodes: list) -> str:
+    by_id = {n.get("id"): n for n in nodes if isinstance(n, dict)}
+
+    def end(key: str) -> str:
+        n = by_id.get(e.get(key))
+        return f'"{" ".join(card_name(n).split())[:40]}"' if n else "a missing card"
+
+    text = f"{end('fromNode')} -> {end('toNode')}"
+    return text + (f' labelled "{e["label"]}"' if e.get("label") else "") + f" (id {e.get('id')})"
+
+
+def find_link(nodes: list, edges: list, item: dict) -> dict:
+    """The link meant by its id, or by the cards it joins (either way round), narrowed by its
+    current label if several join them."""
+    links = [e for e in edges if isinstance(e, dict)]
+    if item.get("id"):
+        hit = [e for e in links if str(e.get("id")) == str(item["id"]).strip()]
+        if hit:
+            return hit[0]
+        raise ObsidianError(f"No link has the id {item['id']}.")
+    a, b = find_card(nodes, item.get("from")), find_card(nodes, item.get("to"))
+    pool = [e for e in links if e.get("fromNode") == a["id"] and e.get("toNode") == b["id"]] or \
+        [e for e in links if e.get("fromNode") == b["id"] and e.get("toNode") == a["id"]]
+    was = _words(item.get("current_label") or "")
+    if was and len(pool) > 1:
+        pool = [e for e in pool if _words(e.get("label") or "") == was] or pool
+    if len(pool) == 1:
+        return pool[0]
+    if pool:
+        raise ObsidianError(f"Several links join {_show(a)} and {_show(b)}: "
+                            + ", ".join(_show_link(e, nodes) for e in pool) + ". Which one?")
+    near = [e for e in links if {e.get("fromNode"), e.get("toNode")} & {a["id"], b["id"]}]
+    raise ObsidianError(f"No link joins {_show(a)} and {_show(b)}. Their links: "
+                        + (", ".join(_show_link(e, nodes) for e in near[:12]) or "none") + ".")
+
+
+def _number(value, what: str, positive: bool = False) -> float | int:
+    try:
+        n = float(str(value).strip())
+    except ValueError:
+        raise ObsidianError(f"The {what} must be a number, not {value}.") from None
+    if n != n or n in (float("inf"), float("-inf")) or (positive and n <= 0):
+        raise ObsidianError(f"The {what} must be a {'positive ' if positive else ''}number.")
+    return int(n) if n == int(n) else n
+
+
+def _colour(value) -> str | None:
+    """Obsidian's colour value for what Sir said, or None to take the colour off."""
+    c = _words(value).replace("colour ", "").replace("color ", "")
+    if c in NO_COLOUR or not c:
+        return None
+    if c in COLOURS:
+        return COLOURS[c]
+    if c in COLOUR_NAMES or re.fullmatch(r"#(?:[0-9a-f]{3}|[0-9a-f]{6})", c):
+        return c
+    raise ObsidianError(f"I can't colour a card {value}: the colours are red, orange, yellow, "
+                        "green, cyan, purple, a #hex colour, or none.")
+
+
+def canvas_changes(nodes: list, edges: list, edit_cards=None, remove_cards=None,
+                   edit_links=None, remove_links=None) -> list[str]:
+    """Change cards and links on a board in place and say what changed. Everything is found
+    and checked first, so a card or link that can't be found changes nothing."""
+    plan: list = []
+    for item in edit_cards or []:
+        item = item if isinstance(item, dict) else {"card": item}
+        node = find_card(nodes, item.get("card") or item.get("id"))
+        change = {}
+        if item.get("text") is not None:
+            if node.get("type", "text") not in ("text", "group"):
+                raise ObsidianError(f"{_show(node)} shows a {node.get('type')}, so its text "
+                                    "can't be changed; remove it and add a card instead.")
+            change["text"] = str(item["text"]).strip()
+            if not change["text"]:
+                raise ObsidianError(f"The new text for {_show(node)} is empty; remove the card "
+                                    "instead?")
+        if item.get("color", item.get("colour")) is not None:
+            change["color"] = _colour(item.get("color", item.get("colour")))
+        for key in ("x", "y"):
+            if item.get(key) is not None:
+                change[key] = _number(item[key], key)
+        for key in ("width", "height"):
+            if item.get(key) is not None:
+                change[key] = _number(item[key], key, positive=True)
+        if not change:
+            raise ObsidianError(f"What should change on {_show(node)}? Its text, colour, place "
+                                "or size.")
+        plan.append(("card", node, change))
+    for item in edit_links or []:
+        if isinstance(item, dict):
+            plan.append(("link", find_link(nodes, edges, item), str(item.get("label") or "").strip()))
+    gone_cards = {}
+    for ref in remove_cards or []:
+        node = find_card(nodes, ref.get("card") or ref.get("id") if isinstance(ref, dict) else ref)
+        gone_cards[node["id"]] = node
+    gone_links = {}
+    for item in remove_links or []:
+        if isinstance(item, dict):
+            e = find_link(nodes, edges, item)
+            gone_links[id(e)] = e
+
+    done = []
+    for kind, target, change in plan:
+        before = _show(target) if kind == "card" else _show_link(target, nodes)
+        if kind == "link":
+            if change:
+                target["label"] = change
+                done.append(f'labelled the link {before} "{change}"')
+            else:
+                target.pop("label", None)
+                done.append(f"took the label off the link {before}")
+            continue
+        if "text" in change:
+            target["label" if target.get("type") == "group" else "text"] = change["text"]
+            done.append(f'changed {before} to "{change["text"]}"')
+        if "color" in change:
+            if change["color"] is None:
+                target.pop("color", None)
+                done.append(f"took the colour off {before}")
+            else:
+                target["color"] = change["color"]
+                done.append(f"coloured {before} {COLOUR_NAMES.get(change['color'], change['color'])}")
+        if "x" in change or "y" in change:
+            target.update({k: change[k] for k in ("x", "y") if k in change})
+            done.append(f"moved {before} to {target.get('x')}, {target.get('y')}")
+        if "width" in change or "height" in change:
+            target.update({k: change[k] for k in ("width", "height") if k in change})
+            done.append(f"resized {before} to {target.get('width')} by {target.get('height')}")
+    for e in gone_links.values():
+        done.append(f"removed the link {_show_link(e, nodes)}")
+    for node_id, node in gone_cards.items():
+        attached = [e for e in edges if isinstance(e, dict) and id(e) not in gone_links
+                    and node_id in (e.get("fromNode"), e.get("toNode"))]
+        done.append(f"removed the card {_show(node)}"
+                    + (f" and its {len(attached)} link{'' if len(attached) == 1 else 's'}"
+                       if attached else ""))
+        gone_links.update({id(e): e for e in attached})
+    if gone_cards or gone_links:
+        edges[:] = [e for e in edges if id(e) not in gone_links]
+        nodes[:] = [n for n in nodes if not (isinstance(n, dict) and n.get("id") in gone_cards)]
+    return done
 
 
 class ObsidianBridge:
@@ -345,16 +532,40 @@ class ObsidianBridge:
 
     # --- Canvas boards ------------------------------------------------------------------------
 
-    def op_canvas(self, canvas: str, cards: list | None = None, links: list | None = None) -> str:
+    def op_canvas(self, canvas: str, cards: list | None = None, links: list | None = None,
+                  edit_cards: list | None = None, remove_cards: list | None = None,
+                  edit_links: list | None = None, remove_links: list | None = None,
+                  preview: bool = False) -> str:
         """Add cards (text, optionally near an existing card) and links (from/to card text,
-        optional label) to a .canvas board, making the board if it doesn't exist."""
+        optional label) to a .canvas board, making the board if it doesn't exist. Also edits
+        existing cards (text, colour, position, size), removes cards (with their links), and
+        changes, unlabels or removes links. Every card or link to edit or remove is found
+        before anything changes; one that's missing or ambiguous stops the whole change with
+        the candidates. preview says what would change without saving."""
         path = self.resolve(canvas, suffix=".canvas", must_exist=False)
         exists = path in self._all_files()
         board = json.loads(self._call("GET", "/vault/" + self._q(path))) if exists else {}
+        if not isinstance(board, dict):
+            raise ObsidianError(f"{path} isn't a canvas board I can read.")
+        changing = edit_cards or remove_cards or edit_links or remove_links
+        if changing and not exists:
+            raise ObsidianError(f"There's no board called {canvas} to change.")
+        if changing and not all(isinstance(board.get(k, []), list) for k in ("nodes", "edges")):
+            raise ObsidianError(f"{path} isn't a canvas board I can read.")
         nodes, edges = board.setdefault("nodes", []), board.setdefault("edges", [])
 
         def label(n: dict) -> str:
             return (n.get("text") or n.get("file") or n.get("label") or "").strip()
+
+        done = canvas_changes(nodes, edges, edit_cards, remove_cards, edit_links,
+                              remove_links) if changing else []
+        if preview:
+            n_cards, n_links = len(cards or []), len(links or [])
+            if n_cards or n_links:
+                done.append(f"add up to {n_cards} card{'' if n_cards == 1 else 's'}"
+                            f" and {n_links} link{'' if n_links == 1 else 's'}")
+            return (f"On the board {path} I would: " + "; ".join(done) + "."
+                    if done else f"Nothing to change on the board {path}.")
 
         def find(text: str) -> dict | None:
             t = " ".join(str(text).split()).lower()
@@ -398,9 +609,14 @@ class ObsidianBridge:
                 edge["label"] = str(link["label"])
             edges.append(edge)
             linked += 1
-        self._call("PUT", "/vault/" + self._q(path), json.dumps(board, indent="\t"),
+        self._call("PUT", "/vault/" + self._q(path),
+                   json.dumps(board, indent="\t", ensure_ascii=False),
                    {"Content-Type": "text/markdown"})   # the plugin mangles application/json
         self._files = None
-        return (f"{'Updated' if exists else 'Made'} the board {path}: {added} card"
-                f"{'' if added == 1 else 's'} and {linked} link{'' if linked == 1 else 's'} added."
+        if done and not (cards or links):
+            return f"Updated the board {path}: " + "; ".join(done) + "."
+        return (f"{'Updated' if exists else 'Made'} the board {path}: "
+                + ("".join(d + "; " for d in done))
+                + f"{added} card{'' if added == 1 else 's'} and {linked} link"
+                f"{'' if linked == 1 else 's'} added."
                 + (f" Couldn't find cards for: {'; '.join(missing)}." if missing else ""))

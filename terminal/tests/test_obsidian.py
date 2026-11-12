@@ -192,6 +192,133 @@ def test_canvas_grows_a_map():
     assert text.startswith("Updated the board Ideas board.canvas: 0 cards")
 
 
+BOARD = {
+    "nodes": [
+        {"id": "g1", "type": "group", "label": "Brain PC", "x": -50, "y": -50, "width": 900,
+         "height": 500, "color": "4"},
+        {"id": "a1", "type": "text", "text": "Speech to text", "x": 0, "y": 0, "width": 250,
+         "height": 60, "styleAttributes": {"textAlign": "center"}},
+        {"id": "b2", "type": "text", "text": "Text to speech (Piper)", "x": 400, "y": 0,
+         "width": 250, "height": 60, "color": "1"},
+        {"id": "c3", "type": "text", "text": "Text to speech notes", "x": 400, "y": 200,
+         "width": 250, "height": 60},
+        {"id": "f4", "type": "file", "file": "Projects/J.A.R.V.I.S.md", "x": 0, "y": 300,
+         "width": 400, "height": 400},
+        {"id": "l5", "type": "link", "url": "https://example.com/é", "x": 500, "y": 300,
+         "width": 400, "height": 300},
+    ],
+    "edges": [
+        {"id": "e1", "fromNode": "a1", "fromSide": "right", "toNode": "b2", "toSide": "left",
+         "label": "then", "toEnd": "arrow"},
+        {"id": "e2", "fromNode": "b2", "toNode": "c3"},
+        {"id": "e3", "fromNode": "f4", "toNode": "l5", "color": "2"},
+    ],
+    "extra": {"kept": True},
+}
+
+
+def board_bridge():
+    b, fake = bridge()
+    fake.files["Boards/J.A.R.V.I.S.canvas"] = json.dumps(BOARD)
+    return b, fake
+
+
+def saved(fake):
+    return json.loads(fake.files["Boards/J.A.R.V.I.S.canvas"])
+
+
+def test_canvas_edits_cards_and_keeps_everything_else():
+    b, fake = board_bridge()
+    ok, text = b.handle("obsidian_canvas", {"canvas": "J.A.R.V.I.S", "edit_cards": [
+        {"card": "speech to text", "text": "Speech to text (Whisper)", "color": "purple"},
+        {"card": "b2", "color": "none", "x": 420, "y": "10", "width": 300},
+        {"card": "Brain PC", "text": "Brain PC (4090)"}]})
+    assert ok, text
+    assert text.startswith("Updated the board Boards/J.A.R.V.I.S.canvas: ")
+    assert 'changed "Speech to text" (id a1) to "Speech to text (Whisper)"' in text
+    assert "coloured" in text and "purple" in text and "took the colour off" in text
+    assert "moved" in text and "420, 10" in text and "resized" in text and "300 by 60" in text
+    board = saved(fake)
+    nodes = {n["id"]: n for n in board["nodes"]}
+    assert nodes["a1"] == {**BOARD["nodes"][1], "text": "Speech to text (Whisper)", "color": "6"}
+    assert nodes["b2"] == {"id": "b2", "type": "text", "text": "Text to speech (Piper)",
+                           "x": 420, "y": 10, "width": 300, "height": 60}
+    assert nodes["g1"] == {**BOARD["nodes"][0], "label": "Brain PC (4090)"}
+    assert "text" not in nodes["g1"]
+    assert [n for n in board["nodes"] if n["id"] in ("c3", "f4", "l5")] == BOARD["nodes"][3:]
+    assert board["edges"] == BOARD["edges"] and board["extra"] == {"kept": True}
+    assert "https://example.com/é" in fake.files["Boards/J.A.R.V.I.S.canvas"]   # not escaped
+
+
+def test_canvas_removes_cards_with_their_links_and_edits_links():
+    b, fake = board_bridge()
+    ok, text = b.handle("obsidian_canvas", {"canvas": "J.A.R.V.I.S",
+                                            "edit_links": [{"from": "Speech to text", "to": "Piper",
+                                                            "label": "speaks via"}],
+                                            "remove_links": [{"from": "example.com",
+                                                              "to": "J.A.R.V.I.S.md"}],
+                                            "remove_cards": ["notes"]})
+    assert ok, text
+    assert 'labelled the link "Speech to text" -> "Text to speech (Piper)"' in text
+    assert "removed the link" in text and 'removed the card "Text to speech notes" (id c3) ' \
+        "and its 1 link" in text
+    board = saved(fake)
+    assert [n["id"] for n in board["nodes"]] == ["g1", "a1", "b2", "f4", "l5"]
+    assert board["edges"] == [{**BOARD["edges"][0], "label": "speaks via"}]
+    ok, text = b.handle("obsidian_canvas", {"canvas": "J.A.R.V.I.S",
+                                            "edit_links": [{"from": "a1", "to": "b2"}]})
+    assert ok and "took the label off the link" in text
+    assert "label" not in saved(fake)["edges"][0]
+    assert saved(fake)["edges"][0]["toEnd"] == "arrow"
+
+
+def test_canvas_ambiguous_or_missing_changes_nothing():
+    b, fake = board_bridge()
+    before = fake.files["Boards/J.A.R.V.I.S.canvas"]
+    ok, text = b.handle("obsidian_canvas", {"canvas": "J.A.R.V.I.S",
+                                            "edit_cards": [{"card": "Speech to text",
+                                                            "color": "red"}],
+                                            "remove_cards": ["text to speech"]})
+    assert not ok and 'Several cards match "text to speech"' in text
+    assert "(id b2)" in text and "(id c3)" in text and "Which one?" in text
+    ok, text = b.handle("obsidian_canvas", {"canvas": "J.A.R.V.I.S", "remove_cards": ["GPU"]})
+    assert not ok and 'No card matches "GPU". The cards are: "Brain PC" (id g1)' in text
+    ok, text = b.handle("obsidian_canvas", {"canvas": "J.A.R.V.I.S", "remove_links": [
+        {"from": "Speech to text", "to": "notes"}]})
+    assert not ok and "No link joins" in text and 'labelled "then" (id e1)' in text
+    ok, text = b.handle("obsidian_canvas", {"canvas": "J.A.R.V.I.S", "edit_cards": [
+        {"card": "J.A.R.V.I.S.md", "text": "x"}]})
+    assert not ok and "shows a file" in text
+    ok, text = b.handle("obsidian_canvas", {"canvas": "J.A.R.V.I.S", "edit_cards": [
+        {"card": "a1", "color": "mauve"}]})
+    assert not ok and "can't colour" in text
+    ok, text = b.handle("obsidian_canvas", {"canvas": "Nope", "remove_cards": ["x"]})
+    assert not ok and "no board called Nope" in text
+    assert fake.files["Boards/J.A.R.V.I.S.canvas"] == before
+    assert "Nope.canvas" not in fake.files
+
+
+def test_canvas_preview_saves_nothing_and_links_pick_by_label():
+    b, fake = board_bridge()
+    board = json.loads(json.dumps(BOARD))
+    board["edges"].append({"id": "e9", "fromNode": "b2", "toNode": "a1", "label": "back"})
+    board["edges"].append({"id": "e8", "fromNode": "a1", "toNode": "b2", "label": "again"})
+    fake.files["Boards/J.A.R.V.I.S.canvas"] = before = json.dumps(board)
+    ok, text = b.handle("obsidian_canvas", {"canvas": "J.A.R.V.I.S", "remove_links": [
+        {"from": "a1", "to": "b2"}]})
+    assert not ok and "Several links join" in text and "(id e1)" in text and "(id e8)" in text
+    ok, text = b.handle("obsidian_canvas", {"canvas": "J.A.R.V.I.S", "preview": True,
+                                            "remove_links": [{"from": "a1", "to": "b2",
+                                                              "current_label": "again"}]})
+    assert ok and text.startswith("On the board Boards/J.A.R.V.I.S.canvas I would: removed "
+                                  'the link "Speech to text" -> "Text to speech (Piper)" '
+                                  'labelled "again" (id e8)')
+    assert fake.files["Boards/J.A.R.V.I.S.canvas"] == before
+    ok, text = b.handle("obsidian_canvas", {"canvas": "J.A.R.V.I.S", "remove_links": [
+        {"id": "e9"}]})
+    assert ok and [e["id"] for e in saved(fake)["edges"]] == ["e1", "e2", "e3", "e8"]
+
+
 def test_wrong_key_and_obsidian_closed():
     fake = FakeObsidian()
     b = ObsidianBridge("wrong", "https://127.0.0.1:27124", opener=fake)

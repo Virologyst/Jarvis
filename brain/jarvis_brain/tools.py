@@ -4,8 +4,8 @@ Every tool that changes anything outside Jarvis only *proposes* it: the handler 
 the screen and the real work runs after someone taps Approve (see approvals.py). Jarvis's own
 state (the screen theme, the task lists) changes directly, and so do Sir's Obsidian project notes,
 which he asked Jarvis to keep (additions and ticks only, each one logged). Reading files (on the
-brain or a terminal) runs directly; writing files on the brain is proposed on a card like
-everything else. Add new tools here.
+brain or a terminal) and searching or reading the web run directly; writing files on the brain
+is proposed on a card like everything else. Add new tools here.
 """
 
 from __future__ import annotations
@@ -22,10 +22,11 @@ from . import clock
 from .files import FileAccessError, FileReader
 from .filewrite import FileWriter
 from .graph import GraphError
-from .mail import Mailbox
+from .mail import REPLY_KIND, Mailbox
 from .tasks import TaskError, TaskStore
 from .themes import THEMES, describe
 from .vault import Vault, VaultError
+from .web import DEFAULT_RESULTS, WebAccess
 
 log = logging.getLogger(__name__)
 
@@ -505,7 +506,8 @@ _VAULT_TOOLS = {"vault_projects", "vault_read", "vault_add_task", "vault_update_
                 "vault_update_project", "vault_new_project", "vault_add_point"}
 
 # --- Sir's email (mail.py, through Microsoft Graph) ---------------------------------------------
-# Reading only for now (reading one marks it read). Email text is untrusted outside content.
+# Reading runs directly (reading one marks it read); a reply is only drafted and put on an
+# approval card, and sent once approved. Email text is untrusted outside content.
 TOOLS += [
     {
         "name": "email_inbox",
@@ -553,8 +555,54 @@ TOOLS += [
              "who": {"type": "string", "description": "Who (not for list)."}},
             ["action"]),
     },
+    {
+        "name": "email_reply",
+        "description": (
+            "Reply to one email in Sir's mailbox, e.g. 'reply to Ronan's email and say thanks "
+            "mate'. Drafts a plain-text reply to its sender in the same thread and puts up an "
+            "approval card showing who it's to, the subject and the whole reply. Nothing is "
+            "sent until Sir approves the card; if he rejects it, the draft is deleted. The email: "
+            "its number from the last email_inbox or email_search list (best), or words from the "
+            "sender's name or subject. Write the reply as Sir would, in his words, plain text."),
+        "input_schema": _schema(
+            {"email": {"type": "string", "description": "Its number, or sender or subject words."},
+             "text": {"type": "string", "description": "The whole reply, as it will be sent."}},
+            ["email", "text"]),
+    },
 ]
-_EMAIL_TOOLS = {"email_inbox", "email_read", "email_search", "email_important"}
+_EMAIL_TOOLS = {"email_inbox", "email_read", "email_search", "email_important", "email_reply"}
+
+# --- The internet (web.py) ----------------------------------------------------------------------
+# Read-only, so no card: searching sends the query to Brave Search (key in the brain's .env), and
+# reading fetches a public page's text. Web content is untrusted outside content, like email.
+TOOLS += [
+    {
+        "name": "web_search",
+        "description": (
+            "Web search on the internet: look up online anything current or that you don't know, "
+            "e.g. products and prices in Australia ('multi-bay hard drive docks'), news, opening "
+            "hours, facts. Returns the top results with title, short snippet, source site and "
+            "web address (the address is for read_web_page, never to read out). To browse a "
+            "result in full, use read_web_page."),
+        "input_schema": _schema(
+            {"query": {"type": "string", "description": "What to search for, as search words."},
+             "count": {"type": "string", "description": "How many results, 1 to 10 (default 5)."}},
+            ["query"]),
+    },
+    {
+        "name": "read_web_page",
+        "description": (
+            "Browse the internet: open a web page online by its address (usually from "
+            "web_search) and read its main text, without menus, scripts or adverts. Long pages "
+            "come back in parts; the result says which start to use to read on."),
+        "input_schema": _schema(
+            {"url": {"type": "string", "description": "The page's full web address."},
+             "start": {"type": "integer",
+                       "description": "Character to start from: 0 for the beginning."}},
+            ["url"]),
+    },
+]
+_WEB_TOOLS = {"web_search", "read_web_page"}
 
 # --- Working in Obsidian with Sir (live, through a terminal's Local REST API plugin) ------------
 # Sent to a terminal as FileRequests ("obsidian_*"); the terminal calls Obsidian on its machine
@@ -610,10 +658,17 @@ TOOLS += [
     {
         "name": "obsidian_canvas",
         "description": (
-            "Add cards and arrows to an Obsidian canvas board (a visual whiteboard), making the "
-            "board if it doesn't exist. A card placed 'near' an existing card goes to its right "
-            "with an arrow from it, which grows a visual mind map. links join two cards by "
-            "their text, with an optional label."),
+            "Add, change and remove cards and arrows on an Obsidian canvas board (a visual "
+            "whiteboard), making the board if it doesn't exist. A card placed 'near' an "
+            "existing card goes to its right with an arrow from it, which grows a visual mind "
+            "map. links join two cards by their text, with an optional label. To keep a board "
+            "up to date: edit_cards changes a card's text, colour, position or size; "
+            "remove_cards removes cards and their arrows; edit_links changes a link's label "
+            "(empty label removes it); remove_links removes links. Cards are named by id, "
+            "exact text or a part of the text only one card has; links by their from and to "
+            "cards (or id). If a card or link is missing or ambiguous nothing changes and the "
+            "candidates come back: pick one and try again. Removals go on an approval card. "
+            "Read the board first (read_file) to see its cards when unsure."),
         "input_schema": _schema(
             {"canvas": {"type": "string", "description": "The board's name or path."},
              "cards": {"type": "array", "items": {"type": "object", "properties": {
@@ -622,7 +677,27 @@ TOOLS += [
                  "required": ["text"]}},
              "links": {"type": "array", "items": {"type": "object", "properties": {
                  "from": {"type": "string"}, "to": {"type": "string"},
-                 "label": {"type": "string"}}, "required": ["from", "to"]}}},
+                 "label": {"type": "string"}}, "required": ["from", "to"]}},
+             "edit_cards": {"type": "array", "items": {"type": "object", "properties": {
+                 "card": {"type": "string", "description": "The card's id or text."},
+                 "text": {"type": "string", "description": "New text (Markdown)."},
+                 "color": {"type": "string",
+                           "description": "red, orange, yellow, green, cyan, purple, #hex, "
+                                          "or none."},
+                 "x": {"type": "number"}, "y": {"type": "number"},
+                 "width": {"type": "number"}, "height": {"type": "number"}},
+                 "required": ["card"]}},
+             "remove_cards": {"type": "array", "items": {
+                 "type": "string", "description": "A card's id or text."}},
+             "edit_links": {"type": "array", "items": {"type": "object", "properties": {
+                 "from": {"type": "string"}, "to": {"type": "string"},
+                 "id": {"type": "string"},
+                 "current_label": {"type": "string",
+                                   "description": "Picks one if several join the same cards."},
+                 "label": {"type": "string", "description": "New label; empty removes it."}}}},
+             "remove_links": {"type": "array", "items": {"type": "object", "properties": {
+                 "from": {"type": "string"}, "to": {"type": "string"},
+                 "id": {"type": "string"}, "current_label": {"type": "string"}}}}},
             ["canvas"]),
     },
 ]
@@ -727,8 +802,10 @@ class ToolBox:
                  vault: Vault | None = None,
                  mailbox: Mailbox | None = None,
                  obsidian_terminals: Callable[[], dict[str, RemoteFiles]] | None = None,
-                 coder_terminals: Callable[[], dict[str, RemoteFiles]] | None = None):
+                 coder_terminals: Callable[[], dict[str, RemoteFiles]] | None = None,
+                 web: WebAccess | None = None):
         self.upgrades = upgrades
+        self.web = web
         self.obsidian_terminals = obsidian_terminals or dict
         self.coder_terminals = coder_terminals or dict
         self.show_card = show_card
@@ -783,6 +860,20 @@ class ToolBox:
             except (OSError, aiohttp.ClientError, asyncio.TimeoutError) as e:
                 log.warning("email: %s", e)
                 return "I couldn't reach Microsoft's email service just now."
+        if name in _WEB_TOOLS:
+            if self.web is None:
+                return "Internet access isn't connected here."
+            if name == "web_search":
+                try:
+                    count = int(str(args.get("count") or DEFAULT_RESULTS).strip())
+                except ValueError:   # a loose tool: the value may not be a number
+                    count = DEFAULT_RESULTS
+                return await self.web.search(str(args.get("query") or ""), count)
+            try:
+                start = int(args.get("start") or 0)
+            except (TypeError, ValueError):
+                start = 0
+            return await self.web.read(str(args.get("url") or ""), start)
         if name in _VAULT_TOOLS:
             if self.vault is None:
                 return "The notes vault isn't connected here."
@@ -963,9 +1054,9 @@ class ToolBox:
             return "Obsidian is open on " + ", ".join(sorted(terminals)) + "; which one?"
         clean = {k: v for k, v in args.items() if v not in (None, "")}
         if name == "obsidian_canvas":
-            clean["cards"] = [c if isinstance(c, dict) else {"text": str(c)}
-                              for c in clean.get("cards") or []]
-            clean["links"] = [ln for ln in clean.get("links") or [] if isinstance(ln, dict)]
+            clean = self._tidy_canvas(clean)
+            if clean.get("remove_cards") or clean.get("remove_links"):
+                return await self._propose_canvas(remote, clean)
         else:
             clean = {k: str(v) for k, v in clean.items()}
         try:
@@ -986,6 +1077,48 @@ class ToolBox:
         except FileAccessError as e:
             return str(e)
 
+    @staticmethod
+    def _tidy_canvas(args: dict) -> dict:
+        """The canvas tool is loose: keep only well-formed items, and only the lists given."""
+        def objects(key: str) -> list:
+            return [x for x in args.get(key) or [] if isinstance(x, dict)]
+
+        clean = {"canvas": str(args.get("canvas") or "")}
+        clean["cards"] = [c if isinstance(c, dict) else {"text": str(c)}
+                          for c in args.get("cards") or []]
+        clean["links"] = objects("links")
+        edits = [c if isinstance(c, dict) else {"card": str(c)}
+                 for c in args.get("edit_cards") or []]
+        removals = [str(c.get("card") or c.get("id") or "") if isinstance(c, dict) else str(c)
+                    for c in args.get("remove_cards") or []]
+        for key, value in (("edit_cards", edits), ("remove_cards", [r for r in removals if r]),
+                           ("edit_links", objects("edit_links")),
+                           ("remove_links", objects("remove_links"))):
+            if value:
+                clean[key] = value
+        return clean
+
+    async def _propose_canvas(self, remote: RemoteFiles, args: dict) -> str:
+        """Removing cards or links deletes from Sir's board, so it goes on an approval card.
+        The terminal checks the change first (preview), so a card it can't find is said now."""
+        if self.approvals is None:
+            return "Removing things from a board needs the approval screen, which isn't here."
+        try:
+            plan = await remote("obsidian_canvas", {**args, "preview": True})
+        except FileAccessError as e:
+            return str(e)
+
+        async def action() -> str:
+            try:
+                return await remote("obsidian_canvas", args)
+            except FileAccessError as e:
+                return str(e)
+
+        title = f"Change the board {args['canvas']}"
+        card = self.approvals.propose(title, plan, action)
+        await self.show_card(card)
+        return f"An approval card is up: {plan} Nothing changes until it's approved."
+
     async def _run_email_tool(self, name: str, args: dict) -> str:
         m = self.mailbox
 
@@ -1000,6 +1133,9 @@ class ToolBox:
             return await m.inbox(True if unread is None else bool(unread), count(10))
         if name == "email_read":
             return await m.read(str(args.get("email") or ""))
+        if name == "email_reply":
+            return await self._propose_reply(str(args.get("email") or ""),
+                                             str(args.get("text") or ""))
         if name == "email_important":
             senders = getattr(m, "important", None)
             if senders is None:
@@ -1015,6 +1151,25 @@ class ToolBox:
                 return senders.unexclude(who)
             return senders.describe()
         return await m.search(str(args.get("query") or ""), count(8))
+
+    async def _propose_reply(self, ref: str, text: str) -> str:
+        """Draft the reply in Sir's mailbox and put it on an approval card; the card's action
+        sends it. A rejected card's draft is deleted (Brain.decide)."""
+        if self.approvals is None:
+            return "Replying to email needs the approval screen, which isn't here."
+        m = self.mailbox
+        await m.tidy_replies({c.card_id for c in self.approvals.pending()})
+        reply = await m.draft_reply(ref, text)
+        if isinstance(reply, str):
+            return reply
+        card = self.approvals.propose(f"Send this reply to {reply.to_names}", reply.card_body(),
+                                      m.send_action(reply), data=reply.card_data(),
+                                      kind=REPLY_KIND)
+        m.replies[card.card_id] = reply
+        await self.show_card(card)
+        return (f"[An approval card is up with the reply to {reply.to_names}, subject "
+                f"'{reply.subject}'. Nothing has been sent: it goes only if Sir approves the card. "
+                "Say you've put the card up, never that it's sent.]")
 
     def _run_vault_tool(self, name: str, args: dict) -> str:
         v = self.vault
