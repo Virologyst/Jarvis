@@ -8,8 +8,8 @@ Each sentence starts with a mood tag ([amused] ...) that becomes an Emote messag
 audio; tags are stripped from everything shown or spoken. A short spoken "approve"/"reject" is
 handled here in code and never reaches Claude, and so is switching permanent listening on or
 off ("listen to me from now on" / "stop listening"); while it's on, noise and scraps are dropped.
-Task reminders (reminders.py) are said unprompted on every terminal once it's quiet, and the
-terminal then listens for an answer as it does after a reply.
+Task reminders (reminders.py) and scheduled briefings (briefings.py) are said unprompted on every
+terminal once it's quiet, and the terminal then listens for an answer as it does after a reply.
 A terminal that shares its drive (Hello.files) answers the file tools' FileRequests for it.
 """
 
@@ -40,6 +40,7 @@ from .emotions import TagStripper, parse_sentence
 from .files import FileAccessError
 from .listenmode import addressed, is_noise, listen_mode_command
 from .llm import Conversation
+from .briefings import BriefingSchedule, BriefingService
 from .reminders import ReminderService
 from .publish import publish_later
 from .selfupgrade import UpgradeManager, take_rollback_note
@@ -124,6 +125,19 @@ class Brain:
         log.info("web search: %s", "configured" if self.web.search_configured
                  else f"not set up ({WEB_KEY_VAR})")
         self.reminders = ReminderService(self.tasks, self.deliver_reminder)
+        # Scheduled briefings (briefings.py): gathered with the same tools as daily_priorities,
+        # reading Sir's notes through whichever terminal reaches Obsidian, then said like reminders
+        self.briefings = BriefingSchedule(REPO_ROOT / "data" / "briefings.json")
+        self._briefing_tools = ToolBox(self.upgrades, self.broadcast, tasks=self.tasks,
+                                       approvals=self.approvals,
+                                       obsidian_terminals=self.obsidian_terminals,
+                                       vault=self.vault, calendar=self.calendar,
+                                       briefings=self.briefings)
+        self.briefing_service = BriefingService(self.briefings,
+                                                self._briefing_tools.gather_briefing,
+                                                self.deliver_reminder,
+                                                ready=lambda: bool(self.sessions))
+        self._briefing_loop: asyncio.Task | None = None
         self._coder_cards: dict[str, str] = {}    # a coder's request id -> its card
         self._reminder_loop: asyncio.Task | None = None
         # Said once to the first terminal that connects: (card title, what to say)
@@ -136,13 +150,15 @@ class Brain:
         if resumed and not self.notice:
             self.notice = ("Self-upgrade", resumed[0].upper() + resumed[1:])
         self._reminder_loop = asyncio.create_task(self.reminders.run())
+        self._briefing_loop = asyncio.create_task(self.briefing_service.run())
         if self.mail_watch:
             self._mail_loop = asyncio.create_task(self.mail_watch.run())
         # Self-upgrades are committed here; get them onto GitHub (publish.py)
         self._publish = asyncio.create_task(publish_later(REPO_ROOT))
 
     async def on_cleanup(self, app: web.Application) -> None:
-        for loop in (self._reminder_loop, self._mail_loop, getattr(self, "_publish", None)):
+        for loop in (self._reminder_loop, self._briefing_loop, self._mail_loop,
+                     getattr(self, "_publish", None)):
             if loop:
                 loop.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -265,7 +281,8 @@ class TerminalSession:
                         vault=getattr(brain, "vault", None),
                         mailbox=getattr(brain, "mailbox", None),
                         web=getattr(brain, "web", None),
-                        calendar=getattr(brain, "calendar", None))
+                        calendar=getattr(brain, "calendar", None),
+                        briefings=getattr(brain, "briefings", None))
         self.conversation = Conversation(brain.client, s.model, s.effort, s.idle_reset_minutes,
                                          tools=REQUEST_TOOLS, run_tool=tools.run)
         self.listening = False

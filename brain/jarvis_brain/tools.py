@@ -24,6 +24,7 @@ import aiohttp
 from jarvis_protocol import Card
 
 from . import clock
+from .briefings import DEFAULT_SNOOZE_MIN, PERSONAL, BriefingError, BriefingSchedule
 from .files import FileAccessError, FileReader
 from .filewrite import FileWriter
 from .graph import GraphError
@@ -32,7 +33,7 @@ from .outlook_calendar import Calendar
 from .priorities import Briefing
 from .tasks import TaskError, TaskStore, parse_day
 from .themes import THEMES, describe
-from .vault import Vault, VaultError
+from .vault import ROUTINES_NOTE, Vault, VaultError
 from .web import DEFAULT_RESULTS, WebAccess
 
 log = logging.getLogger(__name__)
@@ -676,6 +677,33 @@ TOOLS += [
 ]
 _DAY_TOOLS = {"daily_priorities", "calendar_day", "routine_done"}
 
+# --- Scheduled briefings (briefings.py): said unprompted at set times; changing when only changes
+# Jarvis's own settings file (data/briefings.json), like the theme, so no card.
+TOOLS += [
+    {
+        "name": "briefing_schedule",
+        "description": (
+            "Sir's scheduled spoken briefings, said on their own on the screens: the weekday "
+            "priorities briefing (Monday to Friday, 9 am to start with) and the personal "
+            "briefing from his Me note (Saturdays, 9 am). Use it to say when they are, change "
+            "the time or days, turn one on or off, pause it until a day, snooze it ('snooze it "
+            "fifteen minutes' just after one is said), or give one now ('what's on my personal "
+            "list?')."),
+        "input_schema": _schema(
+            {"action": {"type": "string", "description": (
+                "status, time, days, on, off, pause, snooze or now.")},
+             "briefing": {"type": "string", "description": (
+                 "'weekday' (work priorities) or 'personal' (Saturday, the Me note), or Sir's "
+                 "words for it. Empty for both (status) or the one just said (snooze).")},
+             "value": {"type": "string", "description": (
+                 "For time: e.g. '8:30 am' or '08:30'. For days: e.g. 'weekdays', 'Monday to "
+                 "Thursday', 'Saturday and Sunday'. For pause: until which day (" + _DATE +
+                 "). For snooze: minutes, e.g. '15'.")}},
+            ["action"]),
+    },
+]
+_BRIEFING_TOOLS = {"briefing_schedule"}
+
 # --- The internet (web.py) ----------------------------------------------------------------------
 # Read-only, so no card: searching sends the query to Brave Search (key in the brain's .env), and
 # reading fetches a public page's text. Web content is untrusted outside content, like email.
@@ -959,8 +987,10 @@ class ToolBox:
                  obsidian_terminals: Callable[[], dict[str, RemoteFiles]] | None = None,
                  coder_terminals: Callable[[], dict[str, RemoteFiles]] | None = None,
                  web: WebAccess | None = None,
-                 calendar: Calendar | None = None):
+                 calendar: Calendar | None = None,
+                 briefings: BriefingSchedule | None = None):
         self.upgrades = upgrades
+        self.briefings = briefings
         self.web = web
         self.calendar = calendar
         self.obsidian_terminals = obsidian_terminals or dict
@@ -1011,6 +1041,11 @@ class ToolBox:
             try:
                 return await self._run_day_tool(name, args)
             except TaskError as e:
+                return str(e)
+        if name in _BRIEFING_TOOLS:
+            try:
+                return await self._run_briefing_tool(args)
+            except BriefingError as e:
                 return str(e)
         if name in _EMAIL_TOOLS:
             if self.mailbox is None:
@@ -1362,6 +1397,32 @@ class ToolBox:
         return await self._daily_priorities(day, today, str(args.get("person") or ""))
 
     async def _daily_priorities(self, day, today, person: str) -> str:
+        return (await self.gather_priorities(day, today, person)).text()
+
+    async def gather_briefing(self, kind: str) -> Briefing:
+        """A scheduled briefing's contents for today (briefings.py): the weekday priorities, or
+        the personal list from Sir's Me note."""
+        today = self._today()
+        if kind == PERSONAL:
+            return await self.gather_personal(today)
+        return await self.gather_priorities(today, today, "")
+
+    async def gather_personal(self, today) -> Briefing:
+        """Sir's personal list: his Me note only, never the work notes, calendar or to-do list."""
+        b = Briefing(today, today, "Craig", title="Personal list")
+        notes, why = await self._priority_notes()
+        if notes is None:
+            b.missing.append(f"your Me note ({why})")
+            return b
+        me = ROUTINES_NOTE.lower() + ".md"
+        found = next((k for k in notes if k.lower().lstrip("/") == me), None)
+        if found is None:
+            b.missing.append(f"your Me note ({ROUTINES_NOTE} wasn't among the notes)")
+        else:
+            b.add_personal(notes[found])
+        return b
+
+    async def gather_priorities(self, day, today, person: str) -> Briefing:
         """Gather the three sources (each may be missing) and rank them (priorities.py)."""
         owner = tasks_owner = "Craig"
         key = None
@@ -1398,7 +1459,7 @@ class ToolBox:
                 b.add_notes(notes)
                 if why:
                     b.notes.append(why)
-        return b.text()
+        return b
 
     async def _priority_notes(self) -> tuple[dict[str, str] | None, str]:
         """Sir's project notes, live from Obsidian (through its terminal) or else from the vault
@@ -1450,6 +1511,34 @@ class ToolBox:
                 return f"I couldn't get to that note just now ({e.strerror or e})."
         return why or ("I can't reach Sir's notes right now: Obsidian isn't open on his computer "
                        "and the vault isn't on the brain.")
+
+    async def _run_briefing_tool(self, args: dict) -> str:
+        s = self.briefings
+        action = str(args.get("action") or "status").strip().lower()
+        ref, value = str(args.get("briefing") or ""), str(args.get("value") or "").strip()
+        if s is None:
+            return "Scheduled briefings aren't set up here."
+        if action in ("status", "list", "when", ""):
+            return s.describe(s.pick(ref) if ref else None)
+        kind = s.pick(ref, action)
+        if action == "now":
+            return (await self.gather_briefing(kind)).text()
+        if action == "time":
+            return s.set_time(kind, value)
+        if action == "days":
+            return s.set_days(kind, value)
+        if action in ("on", "off"):
+            return s.turn(kind, action == "on")
+        if action == "pause":
+            until = parse_day(value, self._today()) if value else None
+            if until is None:
+                raise BriefingError("Pause it until which day?")
+            return s.pause(kind, until)
+        if action == "snooze":
+            found = re.search(r"\d+", value)
+            return s.snooze(kind, int(found.group()) if found else DEFAULT_SNOOZE_MIN)
+        raise BriefingError(f"I can't do '{action}' with a briefing: status, time, days, on, "
+                            "off, pause, snooze or now.")
 
     async def _run_email_tool(self, name: str, args: dict) -> str:
         m = self.mailbox

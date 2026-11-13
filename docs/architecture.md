@@ -113,7 +113,10 @@ deleted and on-hold tasks stay quiet.
 his Obsidian project notes into one ranked list: fixed times, overdue, due today, daily routines,
 due weekly and monthly routines, project next steps. Duplicates are said once; a source that
 can't be reached is named. Only reads, except `routine_done`, which dates a routine in Sir's
-`Projects/Me` note (like ticking a task there, so no card). See [priorities.md](priorities.md).
+`Projects/Me` note (like ticking a task there, so no card). `briefings.py` says it unprompted
+at 9 am on weekdays, and a personal list from the Me note at 9 am on Saturdays, like reminders
+(mic open afterwards); times, days, pause and snooze are in `data/briefings.json`, changed by
+voice with `briefing_schedule`. See [priorities.md](priorities.md#scheduled-briefings).
 
 ## Reading files
 `list_directory`, `read_file` and `search_files`, mainly for Craig's Obsidian vault (on his

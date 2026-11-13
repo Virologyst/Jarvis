@@ -93,6 +93,7 @@ class Briefing:
     on_hold: list[str] = field(default_factory=list)
     missing: list[str] = field(default_factory=list)   # "the calendar (why)"
     notes: list[str] = field(default_factory=list)     # asides for Jarvis
+    title: str = "Daily priorities"
 
     def add(self, item: Item) -> None:
         """Add, unless it's obviously something already there: then the higher one keeps it."""
@@ -209,6 +210,39 @@ class Briefing:
                               + "; ".join(unticked) + ". If it comes up, routine_done records "
                               "the date.")
 
+    def add_personal(self, text: str, name: str = "Me") -> None:
+        """Sir's personal list, from his Me note only (no work notes, calendar or to-do list):
+        routines that are due, dated tasks, then every other open task under its heading (his
+        personal projects and to-dos), in the note's order. Purchases and the Log stay out."""
+        lines = text.replace("\r\n", "\n").split("\n")
+        unticked: list[str] = []
+        for r in find_routines(text):
+            self._add_routine(r, name, unticked)
+        skip = _left_out_lines(lines, text)
+        where, n = f"the {name} note", 0
+        nxt = spoken(str(read_properties(lines).get("next") or ""))
+        if nxt:
+            self.add(Item(PROJECT, "0000", f"Next up: {nxt}.", where))
+        for t in find_tasks(lines):
+            if t.done or not t.text or t.index in skip:
+                continue
+            said = spoken(t.text)
+            if not said:
+                continue
+            due = _DUE.search(t.text)
+            if due:
+                self._add_dated(said, due, where)
+                continue
+            n += 1
+            heading = spoken(t.section)
+            plain = not heading or heading.lower() in {name.lower(), "tasks", "to do", "todo",
+                                                       "to-do", "notes", "personal"}
+            self.add(Item(PROJECT, f"1{n:03d}", f"To do: {said}." if plain
+                          else f"For {heading}: {said}.", where))
+        if unticked:
+            self.notes.append("Routines ticked in the note with no date, so not counted as due: "
+                              + "; ".join(unticked) + ".")
+
     # Helpers
 
     def _say_day(self, d: date) -> str:
@@ -261,7 +295,7 @@ class Briefing:
         items = self.ranked()[:MAX_ITEMS]
         on = (f"today, {say_date(self.day)}" if self.day == self.today
               else say_date(self.day))
-        head = (f"[Daily priorities for {self.person}, {on}: {len(items)} "
+        head = (f"[{self.title} for {self.person}, {on}: {len(items)} "
                 f"{'thing' if len(items) == 1 else 'things'}, best first. Speak briefly: say how "
                 "many, then the top three or four in this order, naturally (times as a person "
                 "says them), and offer the rest. Numbers, sources and brackets are for you, not "

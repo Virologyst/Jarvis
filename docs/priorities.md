@@ -64,3 +64,23 @@ monthly one a calendar month after; one never done is due. A box ticked by hand 
 counts as done, and Jarvis mentions it so the date can be recorded. Through Obsidian the change is
 saved only if Sir hasn't typed since it was read; on the brain the file is replaced in one step.
 It isn't written in a Log: the date is the record.
+
+## Scheduled briefings
+
+`brain/jarvis_brain/briefings.py`: Jarvis says two briefings on his own, like reminders (queued
+on every screen, said once each is quiet, then the mic stays open for "snooze it", "I've mowed
+the lawns" or "what else?"):
+
+- **Weekday priorities**, Monday to Friday at 9 am Brisbane: the same gathering and ranking as
+  `daily_priorities`, said as how many things there are and the top four in order.
+- **Personal briefing**, Saturdays at 9 am: from `Projects/Me` only (no work notes, calendar or
+  to-do list): routines that are due, dated tasks, then every other open task under its heading
+  (personal projects and to-dos). Purchases and the Log stay out.
+
+The words are put together in code; the whole list goes into the conversation so Jarvis can give
+the rest. Times, days, on/off, a pause until a day and a snooze are kept in `data/briefings.json`
+and changed by voice with `briefing_schedule` ("move the Saturday briefing to eight", "turn the
+weekday briefing off", "pause it until Monday", "snooze it ten minutes"; also "now" to hear one).
+One that fell due while the brain was off or no screen was connected is said up to two hours
+late, otherwise it waits for its next day; a new time that's already gone today starts next time.
+That file is Jarvis's own settings, like the theme, so changing it needs no approval card.
