@@ -107,6 +107,14 @@ idle terminal open the mic afterwards, and the reminder is added to that termina
 unless the task is over an hour past its deadline (or, with no deadline, 12 hours late); done,
 deleted and on-hold tasks stay quiet.
 
+## Daily priorities
+`brain/jarvis_brain/priorities.py`: `daily_priorities` combines Sir's Outlook calendar
+(`outlook_calendar.py`, read-only, `Calendars.Read` through the email sign-in), the to-do list and
+his Obsidian project notes into one ranked list: fixed times, overdue, due today, daily routines,
+due weekly and monthly routines, project next steps. Duplicates are said once; a source that
+can't be reached is named. Only reads, except `routine_done`, which dates a routine in Sir's
+`Projects/Me` note (like ticking a task there, so no card). See [priorities.md](priorities.md).
+
 ## Reading files
 `list_directory`, `read_file` and `search_files`, mainly for Craig's Obsidian vault (on his
 terminal, under `C:\Users\craig\Documents\Obsidian`). The reader is

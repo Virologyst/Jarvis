@@ -12,10 +12,13 @@ is proposed on a card like everything else. Add new tools here.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
 from collections.abc import Awaitable, Callable
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import aiohttp
 from jarvis_protocol import Card
@@ -25,7 +28,9 @@ from .files import FileAccessError, FileReader
 from .filewrite import FileWriter
 from .graph import GraphError
 from .mail import REPLY_KIND, Mailbox
-from .tasks import TaskError, TaskStore
+from .outlook_calendar import Calendar
+from .priorities import Briefing
+from .tasks import TaskError, TaskStore, parse_day
 from .themes import THEMES, describe
 from .vault import Vault, VaultError
 from .web import DEFAULT_RESULTS, WebAccess
@@ -175,9 +180,11 @@ TOOLS += [
     {
         "name": "tasks_for_day",
         "description": (
-            "Someone's rundown for a day, e.g. 'what tasks do I have today?': tasks due that day "
-            "in time order, overdue ones flagged (for today), on-hold ones listed separately, "
-            "completed ones left out."),
+            "Someone's to-do list rundown for a day, e.g. 'what tasks do I have today?': tasks "
+            "due that day in time order, overdue ones flagged (for today), on-hold ones listed "
+            "separately, completed ones left out. For 'what are my priorities today?', 'what's "
+            "on today?' or a morning briefing, use daily_priorities instead (found with tool "
+            "search), which adds the calendar and project notes."),
         "input_schema": _schema(
             {"person": _PERSON,
              "date": {"type": "string", "description": "Which day: " + _DATE + " Empty for today."}}),
@@ -629,6 +636,46 @@ TOOLS += [
 ]
 _EMAIL_TOOLS = {"email_inbox", "email_read", "email_search", "email_important", "email_reply"}
 
+# --- The day: Sir's Outlook calendar (outlook_calendar.py, read-only) and daily priorities ------
+# (priorities.py). Both only read; routine_done writes one date on a routine line in Sir's notes,
+# like ticking a task there, so it runs without a card.
+TOOLS += [
+    {
+        "name": "daily_priorities",
+        "description": (
+            "Sir's priorities for a day, in one briefing: 'what are my priorities today?', "
+            "'what's on today?', 'what have I got on?', 'morning briefing', 'what should I do "
+            "first?'. Combines his Outlook calendar, his to-do list and his Obsidian project "
+            "notes (dated and #j tasks, next steps, daily and due weekly or monthly routines), "
+            "duplicates removed, ranked best first, and says which source couldn't be reached."),
+        "input_schema": _schema(
+            {"date": {"type": "string", "description": "Which day: " + _DATE + " Empty for today."},
+             "person": _PERSON}),
+    },
+    {
+        "name": "calendar_day",
+        "description": (
+            "What's in Sir's Outlook calendar on a day (meetings and appointments: time, title, "
+            "place, who's coming), Brisbane time. Read-only: you can't add, change, accept or "
+            "decline events."),
+        "input_schema": _schema(
+            {"date": {"type": "string", "description": "Which day: " + _DATE + " Empty for today."}}),
+    },
+    {
+        "name": "routine_done",
+        "description": (
+            "Record that Sir has done one of his recurring routines (chores) today, e.g. 'I've "
+            "mowed the lawns', 'kitchen's clean': writes today's date as 'last done' on it in the "
+            "Routines section of his Me note, so it isn't brought up again until it's next due."),
+        "input_schema": _schema(
+            {"routine": {"type": "string", "description": "Which routine, e.g. 'mow the lawns'."},
+             "note": {"type": "string",
+                      "description": "The note with the routines; empty for Projects/Me."}},
+            ["routine"]),
+    },
+]
+_DAY_TOOLS = {"daily_priorities", "calendar_day", "routine_done"}
+
 # --- The internet (web.py) ----------------------------------------------------------------------
 # Read-only, so no card: searching sends the query to Brave Search (key in the brain's .env), and
 # reading fetches a public page's text. Web content is untrusted outside content, like email.
@@ -911,9 +958,11 @@ class ToolBox:
                  mailbox: Mailbox | None = None,
                  obsidian_terminals: Callable[[], dict[str, RemoteFiles]] | None = None,
                  coder_terminals: Callable[[], dict[str, RemoteFiles]] | None = None,
-                 web: WebAccess | None = None):
+                 web: WebAccess | None = None,
+                 calendar: Calendar | None = None):
         self.upgrades = upgrades
         self.web = web
+        self.calendar = calendar
         self.obsidian_terminals = obsidian_terminals or dict
         self.coder_terminals = coder_terminals or dict
         self.show_card = show_card
@@ -956,6 +1005,11 @@ class ToolBox:
                 raise RuntimeError("the task lists aren't available here")
             try:
                 return self._run_task_tool(name, args)
+            except TaskError as e:
+                return str(e)
+        if name in _DAY_TOOLS:
+            try:
+                return await self._run_day_tool(name, args)
             except TaskError as e:
                 return str(e)
         if name in _EMAIL_TOOLS:
@@ -1281,6 +1335,121 @@ class ToolBox:
         card = self.approvals.propose(plan.title, plan.body, action)
         await self.show_card(card)
         return f"An approval card is up: {plan.title}. Nothing is deleted until it's approved."
+
+    # --- the day: calendar, daily priorities, routines ---------------------------------------
+
+    def _today(self):
+        if self.tasks is not None:
+            return self.tasks.today()
+        return datetime.now(ZoneInfo(clock.HOME_ZONE)).date()
+
+    async def _run_day_tool(self, name: str, args: dict) -> str:
+        today = self._today()
+        day = parse_day(str(args.get("date") or ""), today) or today
+        if name == "calendar_day":
+            if self.calendar is None:
+                return "The Outlook calendar isn't connected here."
+            try:
+                return await self.calendar.describe(day)
+            except GraphError as e:
+                return str(e)
+            except (OSError, aiohttp.ClientError, asyncio.TimeoutError) as e:
+                log.warning("calendar: %s", e)
+                return "I couldn't reach Microsoft's calendar service just now."
+        if name == "routine_done":
+            return await self._routine_done(str(args.get("routine") or ""),
+                                            str(args.get("note") or ""), today)
+        return await self._daily_priorities(day, today, str(args.get("person") or ""))
+
+    async def _daily_priorities(self, day, today, person: str) -> str:
+        """Gather the three sources (each may be missing) and rank them (priorities.py)."""
+        owner = tasks_owner = "Craig"
+        key = None
+        if self.tasks is not None:
+            key = self.tasks.person(person or None, self.speaker())
+            tasks_owner = self.tasks.people.get(key, key)
+        b = Briefing(day, today, tasks_owner)
+        sirs = tasks_owner.lower() == owner.lower()
+        calendar_job = asyncio.create_task(self.calendar.events(day)) \
+            if sirs and self.calendar is not None else None
+        notes_job = asyncio.create_task(self._priority_notes()) if sirs else None
+        if self.tasks is None:
+            b.missing.append("the to-do list (not available here)")
+        else:
+            b.add_tasks(self.tasks, key)
+        if not sirs:
+            b.notes.append(f"The calendar and project notes are Sir's own, so this is "
+                           f"{tasks_owner}'s to-do list only.")
+        elif calendar_job is None:
+            b.missing.append("the Outlook calendar (not connected here)")
+        else:
+            try:
+                b.add_events(await calendar_job)
+            except GraphError as e:
+                b.missing.append(f"the Outlook calendar ({e})")
+            except (OSError, aiohttp.ClientError, asyncio.TimeoutError) as e:
+                log.warning("calendar: %s", e)
+                b.missing.append("the Outlook calendar (Microsoft didn't answer)")
+        if notes_job is not None:
+            notes, why = await notes_job
+            if notes is None:
+                b.missing.append(f"the Obsidian notes ({why})")
+            else:
+                b.add_notes(notes)
+                if why:
+                    b.notes.append(why)
+        return b.text()
+
+    async def _priority_notes(self) -> tuple[dict[str, str] | None, str]:
+        """Sir's project notes, live from Obsidian (through its terminal) or else from the vault
+        on the brain: (vault path -> text, an aside), or (None, why not)."""
+        why = ""
+        terminals, here = self.obsidian_terminals(), self.terminal_id()
+        if terminals:
+            remote = terminals.get(here) or terminals[sorted(terminals)[0]]
+            try:
+                data = json.loads(await remote("obsidian_project_notes", {}))
+                notes = data["notes"]
+                if not isinstance(notes, dict):
+                    raise ValueError("not a list of notes")
+                left = int(data.get("left_out") or 0)
+                return ({str(k): str(v) for k, v in notes.items()},
+                        f"{left} project notes weren't read (too many)." if left else "")
+            except FileAccessError as e:
+                why = str(e)
+            except (ValueError, KeyError, TypeError) as e:
+                log.warning("priorities: odd answer from Obsidian: %s", e)
+                why = "Obsidian's answer couldn't be read"
+        if self.vault is not None and self.vault.root is not None:
+            try:
+                return await asyncio.to_thread(self.vault.project_notes), ""
+            except (VaultError, OSError) as e:
+                why = why or str(e)
+        return None, why or "Obsidian isn't open on Sir's computer, and the vault isn't on the brain"
+
+    async def _routine_done(self, routine: str, note: str, today) -> str:
+        if not routine.strip():
+            return "Which routine?"
+        terminals, here = self.obsidian_terminals(), self.terminal_id()
+        why = ""
+        if terminals:
+            remote = terminals.get(here) or terminals[sorted(terminals)[0]]
+            args = {"routine": routine, "day": today.isoformat(), **({"note": note} if note else {})}
+            try:
+                return await remote("obsidian_routine_done", args)
+            except FileAccessError as e:
+                why = str(e)
+                if "routine" in why.lower():   # the note answered: no such routine, which one
+                    return why
+        if self.vault is not None and self.vault.root is not None:
+            try:
+                return await asyncio.to_thread(self.vault.routine_done, routine, note or None)
+            except VaultError as e:
+                return str(e)
+            except OSError as e:
+                return f"I couldn't get to that note just now ({e.strerror or e})."
+        return why or ("I can't reach Sir's notes right now: Obsidian isn't open on his computer "
+                       "and the vault isn't on the brain.")
 
     async def _run_email_tool(self, name: str, args: dict) -> str:
         m = self.mailbox

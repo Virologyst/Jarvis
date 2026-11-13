@@ -35,6 +35,10 @@ changes nothing and the candidates come back. Every other card, arrow and field 
 first checks the change without saving (`preview`) so the card says exactly what will go.
 Obsidian's file recovery (Settings, Core plugins) keeps snapshots if an edit needs undoing.
 
+Two more ops serve the daily priorities ([priorities.md](priorities.md)):
+`obsidian_project_notes` reads every note in `Projects/` (read-only) and `obsidian_routine_done`
+writes a routine's "last done" date in `Projects/Me`, saved only if Sir hasn't typed since.
+
 It works while Obsidian is open on that PC and its terminal is running. The `vault_*` tools
 (docs/vault.md) are the other route: files on the brain PC, for when Obsidian isn't open.
 

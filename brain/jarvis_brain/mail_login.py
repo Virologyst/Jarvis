@@ -1,4 +1,5 @@
-"""Sign Jarvis in to Sir's Microsoft 365 mailbox (once, on the brain PC, as the brain's account).
+"""Sign Jarvis in to Sir's Microsoft 365 mailbox and (read-only) calendar (once, on the brain
+PC, as the brain's account; again after calendar access is added, docs/email.md).
 
     .venv\\Scripts\\python -m jarvis_brain.mail_login           # sign in
     .venv\\Scripts\\python -m jarvis_brain.mail_login --check   # who's signed in, and a test read

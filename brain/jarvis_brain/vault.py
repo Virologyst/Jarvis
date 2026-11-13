@@ -22,17 +22,19 @@ import os
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from jarvis_protocol.progress import refresh_bar
+from jarvis_protocol.routines import RoutineError, mark_done
 
 from .clock import HOME_ZONE
 
 log = logging.getLogger(__name__)
 
 PROJECTS_DIR = "Projects"
+ROUTINES_NOTE = "Projects/Me"      # where Sir keeps his Daily, Weekly and Monthly routines
 TEMPLATE = Path("Templates") / "Project.md"
 STATUSES = ("idea", "planned", "active", "on hold", "done")
 J_TAG = "#j"
@@ -927,3 +929,31 @@ class Vault:
                 lines = set_property(lines, "updated", self._today())
             self._write(path, lines, newline)
         return f"Added '{text}' to {path.stem}, {where}."
+
+    # Daily priorities (priorities.py) and Sir's recurring routines (jarvis_protocol.routines)
+
+    def project_notes(self) -> dict[str, str]:
+        """Every note in Projects/, read-only: vault path -> text, for the day's priorities."""
+        root = self._need()
+        folder = root / PROJECTS_DIR
+        notes: dict[str, str] = {}
+        for p in self._notes():
+            if folder not in p.parents:
+                continue
+            try:
+                notes[p.relative_to(root).as_posix()] = "\n".join(self._read(p)[0])
+            except (OSError, UnicodeDecodeError):
+                continue
+        return notes
+
+    def routine_done(self, routine: str, note: str | None = None) -> str:
+        """Date one routine as done today (Projects/Me unless another note is named)."""
+        path = self._find(note or ROUTINES_NOTE)
+        lines, newline = self._read(path)
+        try:
+            text, said = mark_done("\n".join(lines), routine, date.fromisoformat(self._today()))
+        except RoutineError as e:
+            raise VaultError(f"{e} (in {path.stem})") from None
+        if text != "\n".join(lines):
+            self._write(path, text.split("\n"), newline)
+        return said

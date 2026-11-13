@@ -420,3 +420,27 @@ def test_new_project_from_the_template_linked_from_the_map():
     assert ("POST", "/open/Projects/Me.md") in [(c[0], c[1]) for c in fake.calls]
     ok, text = b.handle("obsidian_new_project", {"name": "me"})
     assert not ok and "already a project note called me" in text
+
+
+ROUTINES = "# Me\n## Routines\n### Weekly\n- Mow the lawns (last done 2026-11-01)\n- Clean the car\n"
+
+
+def test_project_notes_are_read_for_the_daily_priorities():
+    b, fake = bridge(files={"Projects/J.A.R.V.I.S.md": NOTE, "Projects/Me.md": ROUTINES,
+                            "Projects/board.canvas": "{}", "Home.md": "# Home\n"})
+    ok, text = b.handle("obsidian_project_notes", {})
+    assert ok
+    assert json.loads(text) == {"notes": {"Projects/J.A.R.V.I.S.md": NOTE,
+                                          "Projects/Me.md": ROUTINES}, "left_out": 0}
+    assert all(c[0] == "GET" for c in fake.calls)          # read-only
+
+
+def test_routine_done_dates_one_line_in_the_me_note():
+    b, fake = bridge(files={"Projects/Me.md": ROUTINES})
+    ok, text = b.handle("obsidian_routine_done", {"routine": "mow the lawns", "day": "2026-11-13"})
+    assert ok and "Marked Mow the lawns (weekly) done on 2026-11-13" in text
+    assert fake.files["Projects/Me.md"] == ROUTINES.replace("2026-11-01", "2026-11-13")
+    put = [c for c in fake.calls if c[0] == "PUT"]
+    assert len(put) == 1 and "if-match" in put[0][2]        # only if Sir hasn't typed since
+    ok, text = b.handle("obsidian_routine_done", {"routine": "walk the dog", "day": "2026-11-13"})
+    assert not ok and "no routine like" in text and "Projects/Me.md" in text

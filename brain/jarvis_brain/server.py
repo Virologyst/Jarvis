@@ -48,6 +48,7 @@ from .stt import Transcriber
 from .themes import DEFAULT_THEME, THEMES, ThemeStore, resolve
 from .graph import Graph, GraphAuth
 from .mail import REPLY_KIND, Mailbox
+from .outlook_calendar import Calendar
 from .mail_watch import Announcement, ImportantSenders, MailWatcher, Sorter, parse_quiet
 from .tasks import TaskStore
 from .vault import Vault
@@ -97,6 +98,7 @@ class Brain:
         # Sir's Microsoft 365 mailbox (graph.py); tools say so if it isn't set up or signed in
         mail_auth = GraphAuth.from_env()
         self.mailbox = Mailbox(Graph(mail_auth))
+        self.calendar = Calendar(self.mailbox.graph)   # read-only, same sign-in (outlook_calendar.py)
         self.approvals.register(REPLY_KIND, self.mailbox.rebuild_reply)   # reply cards
         self.approvals.restore()   # after every owner of saved cards has registered
         log.info("email: %s", "configured" if mail_auth.configured
@@ -262,7 +264,8 @@ class TerminalSession:
                                                  if hasattr(brain, "coder_terminals") else {}),
                         vault=getattr(brain, "vault", None),
                         mailbox=getattr(brain, "mailbox", None),
-                        web=getattr(brain, "web", None))
+                        web=getattr(brain, "web", None),
+                        calendar=getattr(brain, "calendar", None))
         self.conversation = Conversation(brain.client, s.model, s.effort, s.idle_reset_minutes,
                                          tools=REQUEST_TOOLS, run_tool=tools.run)
         self.listening = False

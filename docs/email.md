@@ -13,6 +13,16 @@ Code: `brain/jarvis_brain/graph.py` (sign-in, Graph requests), `mail.py` (inbox,
 reply drafts), `mail_watch.py` (watching and announcing), tools `email_inbox`, `email_read`,
 `email_search`, `email_important`, `email_reply` in `tools.py` (loaded on demand).
 
+## Calendar (read-only)
+
+`calendar_day` ("what meetings have I got tomorrow?") and the daily priorities
+([priorities.md](priorities.md)) read Sir's Outlook calendar through the same sign-in, in
+`brain/jarvis_brain/outlook_calendar.py`: one GET of the day's calendar view, times in Brisbane,
+cancelled events left out, with title, place and who's coming. It asks for its own scope,
+`Calendars.Read`, so email keeps working on a sign-in from before the calendar was added; until
+the permission is granted and Sir signs in again, Jarvis says the calendar needs it. Jarvis can't
+create, change, accept or decline events. Invitation text is untrusted, like email.
+
 ## Replies
 
 - `email_reply` takes the email (its number from the last list, or the sender or subject) and the
@@ -49,7 +59,8 @@ reply drafts), `mail_watch.py` (watching and announcing), tools `email_inbox`, `
 ## Safety
 
 - **One mailbox, delegated access.** Jarvis acts as the signed-in user with `Mail.ReadWrite`,
-  `Mail.Send` and `User.Read` only: no other mailboxes, no admin rights, no client secret.
+  `Mail.Send`, `User.Read` and (read-only) `Calendars.Read` only: no other mailboxes or
+  calendars, no admin rights, no client secret.
   Remove its access any time in Microsoft 365 (Entra ID, Enterprise applications, Jarvis) or
   delete `data/email/token-cache.json` on the brain PC.
 - **Email is untrusted.** Results label an email's text as outside content to report, never
@@ -66,7 +77,9 @@ reply drafts), `mail_watch.py` (watching and announcing), tools `email_inbox`, `
    App registrations, New registration. Name `Jarvis`, *Accounts in this organizational
    directory only*, no redirect URI. Copy the **Application (client) ID** and **Directory
    (tenant) ID**. Authentication: **Allow public client flows: Yes**. API permissions: Microsoft
-   Graph, Delegated: `Mail.ReadWrite`, `Mail.Send`; then **Grant admin consent**.
+   Graph, Delegated: `Mail.ReadWrite`, `Mail.Send`, `Calendars.Read`; then **Grant admin
+   consent**. (Already set up for email? Add `Calendars.Read`, grant consent, and do step 3
+   again so the sign-in includes the calendar.)
 2. **On the brain PC**, in `.env`:
    ```
    JARVIS_GRAPH_CLIENT_ID=<application (client) id>

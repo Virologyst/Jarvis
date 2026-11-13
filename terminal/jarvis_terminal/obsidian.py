@@ -11,7 +11,9 @@ linked from the Success Map), obsidian_project (note, progress, status, next, lo
 project note's properties,
 its coloured progress bar and log), obsidian_delete (note, text, heading, which, preview,
 expect), obsidian_open (note), obsidian_search (query), obsidian_canvas (canvas, cards, links,
-edit_cards, remove_cards, edit_links, remove_links, preview).
+edit_cards, remove_cards, edit_links, remove_links, preview), obsidian_project_notes (every
+note in Projects/, read-only, as JSON, for the brain's daily priorities), obsidian_routine_done
+(routine, note, day: date one of Sir's recurring routines as done; jarvis_protocol.routines).
 A note is a vault path ("Projects/J.A.R.V.I.S.md"), a name ("J.A.R.V.I.S"), or "" for the note
 open now. Headings are "Parent > Child". Everything answers (ok, text) for Jarvis to use.
 Only 127.0.0.1 is ever called: the plugin's certificate is its own, so it isn't checked.
@@ -31,6 +33,7 @@ import urllib.request
 from datetime import date
 
 from jarvis_protocol.progress import refresh_bar
+from jarvis_protocol.routines import RoutineError, mark_done
 
 log = logging.getLogger(__name__)
 STATUSES = ("idea", "planned", "active", "on hold", "done")
@@ -88,6 +91,10 @@ TIMEOUT_S = 8.0
 MAX_TEXT = 12_000
 LIST_CACHE_S = 30.0
 MAX_FILES = 5000
+PROJECTS = "Projects/"
+MAX_PROJECT_NOTES = 80        # read for the daily priorities...
+PROJECT_NOTES_S = 12.0        # ...inside the brain's 20 s wait for an answer
+ROUTINES_NOTE = "Projects/Me"
 CARD_W, CARD_H, GAP = 280, 120, 60
 NOTE_JSON = "application/vnd.olrapi.note+json"
 
@@ -795,6 +802,51 @@ class ObsidianBridge:
         except ObsidianError as e:
             log.warning("obsidian: couldn't link %s from the Success Map: %s", name, e)
             return False
+
+    def op_project_notes(self) -> str:
+        """Every note in Projects/ (read-only), as JSON {"notes": {path: text}, "left_out": n},
+        for the brain to gather the day's priorities from. Notes past the limit or the time
+        budget are counted, not read."""
+        files = sorted(f for f in self._all_files()
+                       if f.startswith(PROJECTS) and f.lower().endswith(".md"))
+        notes: dict[str, str] = {}
+        started, left_out = time.monotonic(), 0
+        for path in files:
+            if len(notes) >= MAX_PROJECT_NOTES or time.monotonic() - started > PROJECT_NOTES_S:
+                left_out += 1
+                continue
+            try:
+                notes[path] = self._call("GET", "/vault/" + self._q(path),
+                                         headers={"Accept": "text/markdown"})
+            except ObsidianError as e:
+                if "couldn't find" not in str(e):   # gone since the listing: skip it
+                    raise
+        return json.dumps({"notes": notes, "left_out": left_out})
+
+    def op_routine_done(self, routine: str, note: str = "", day: str = "") -> str:
+        """Write "(last done <day>)" on one routine in the note's Routines section (Projects/Me
+        unless said), saved only if Sir hasn't typed since it was read. `day` comes from the
+        brain (Brisbane)."""
+        when = date.fromisoformat(day) if day else date.today()
+        api, path = self._target(note or ROUTINES_NOTE)
+        said = ""
+        for attempt in range(2):
+            current, info = self._exchange("GET", api, headers={"Accept": "text/markdown"})
+            try:
+                updated, said = mark_done(current, routine, when)
+            except RoutineError as e:
+                raise ObsidianError(f"{e} (in {path})") from None
+            if updated == current:
+                return said
+            tag = info.get("etag")
+            try:
+                self._call("PUT", api, updated, {"Content-Type": "text/markdown",
+                                                 **({"If-Match": tag} if tag else {})})
+                return f"{said} (in {path})"
+            except ObsidianError as e:
+                if "(412)" not in str(e) or attempt:
+                    raise
+        return said
 
     def op_open(self, note: str) -> str:
         path = self.resolve(note)

@@ -1,8 +1,11 @@
-"""Microsoft Graph: Sir's Microsoft 365 mailbox, signed in once on the brain PC.
+"""Microsoft Graph: Sir's Microsoft 365 mailbox and calendar, signed in once on the brain PC.
 
 Jarvis is registered in V Source's Microsoft 365 (Entra ID) as a public client with delegated
-permissions for the signed-in user's own mail (Mail.ReadWrite, Mail.Send) and nothing else: no
-other mailboxes, no admin rights, no client secret. Sir signs in once with a device code
+permissions for the signed-in user's own mail (Mail.ReadWrite, Mail.Send) and, read-only, his own
+calendar (Calendars.Read), and nothing else: no other mailboxes, no admin rights, no client
+secret. Email asks only for the mail scopes, so a sign-in from before the calendar was added
+keeps email working; the calendar asks for its own scope and says so if Sir needs to sign in
+again to give it. Sir signs in once with a device code
 (`python -m jarvis_brain.mail_login`); MSAL keeps a refresh token in data/email/token-cache.json
 and renews access tokens itself.
 
@@ -33,6 +36,7 @@ log = logging.getLogger(__name__)
 GRAPH = "https://graph.microsoft.com/v1.0"
 # offline_access (for the refresh token) is added by MSAL itself
 SCOPES = ["Mail.ReadWrite", "Mail.Send", "User.Read"]
+CALENDAR_SCOPES = ["Calendars.Read"]        # read-only: Jarvis never changes the calendar
 TOKEN_CACHE = REPO_ROOT / "data" / "email" / "token-cache.json"
 MAX_RETRIES = 3
 
@@ -90,31 +94,35 @@ class GraphAuth:
         accounts = self._application().get_accounts()
         return accounts[0].get("username") if accounts else None
 
-    def _token_now(self) -> str:
+    def _token_now(self, scopes: list[str]) -> str:
         app = self._application()
         accounts = app.get_accounts()
         if not accounts:
             raise GraphError("Email isn't signed in yet: run the sign-in on the brain PC "
                              "(python -m jarvis_brain.mail_login).")
-        result = app.acquire_token_silent(SCOPES, account=accounts[0])
+        result = app.acquire_token_silent(scopes, account=accounts[0])
         self._save()
         if not result or "access_token" not in result:
             reason = (result or {}).get("error_description", "no saved sign-in")
-            log.warning("graph: silent sign-in failed: %s", reason)
+            log.warning("graph: silent sign-in failed for %s: %s", scopes, reason)
+            if scopes == CALENDAR_SCOPES:
+                raise GraphError("Jarvis can't see the Outlook calendar yet: it needs calendar "
+                                 "permission (Calendars.Read) in Microsoft 365 and Sir signing "
+                                 "in again (python -m jarvis_brain.mail_login on the brain PC).")
             raise GraphError("Microsoft needs Sir to sign Jarvis in to email again "
                              "(python -m jarvis_brain.mail_login on the brain PC).")
         return result["access_token"]
 
-    async def token(self) -> str:
+    async def token(self, scopes: list[str] | None = None) -> str:
         async with self._lock:   # MSAL isn't async; one refresh at a time
-            return await asyncio.to_thread(self._token_now)
+            return await asyncio.to_thread(self._token_now, scopes or SCOPES)
 
     # Signing in (the mail_login script)
 
     def sign_in(self, show: Callable[[str], None] = print) -> str:
         """Device-code sign-in: shows a code to enter at microsoft.com/devicelogin, waits."""
         app = self._application()
-        flow = app.initiate_device_flow(scopes=SCOPES)
+        flow = app.initiate_device_flow(scopes=SCOPES + CALENDAR_SCOPES)
         if "user_code" not in flow:
             raise GraphError(f"Microsoft wouldn't start a sign-in: "
                              f"{flow.get('error_description') or flow}")
@@ -160,13 +168,16 @@ class Graph:
             return r.status, dict(r.headers), data or {}
 
     async def request(self, method: str, path: str, params: dict | None = None,
-                      body: dict | None = None, headers: dict | None = None) -> dict:
+                      body: dict | None = None, headers: dict | None = None,
+                      scopes: list[str] | None = None, what: str = "email") -> dict:
+        """`scopes` other than the mail ones (the calendar's); `what` names the service in
+        what Jarvis says if it fails."""
         url = path if path.startswith("http") else GRAPH + path
         if params:
             url += ("&" if "?" in url else "?") + "&".join(
                 f"{k}={_quote(str(v))}" for k, v in params.items())
         for attempt in range(MAX_RETRIES + 1):
-            token = await self.auth.token()
+            token = await (self.auth.token(scopes) if scopes else self.auth.token())
             status, reply_headers, data = await self._fetch(
                 method, url, {"Authorization": f"Bearer {token}", **(headers or {})}, body)
             if status in (429, 503, 504) and attempt < MAX_RETRIES:
@@ -178,13 +189,14 @@ class Graph:
                 message = (data.get("error") or {}).get("message") or f"HTTP {status}"
                 log.warning("graph %s %s: %s %s", method, path, status, message)
                 if status in (401, 403):
-                    raise GraphError("Microsoft refused Jarvis's access to email "
+                    raise GraphError(f"Microsoft refused Jarvis's access to {what} "
                                      f"({message}). It may need signing in again.")
                 if status == 404:
-                    raise GraphError("That email isn't there any more.")
-                raise GraphError(f"Microsoft's email service said: {message}")
+                    raise GraphError("That email isn't there any more." if what == "email"
+                                     else f"Microsoft couldn't find that in the {what}.")
+                raise GraphError(f"Microsoft's {what} service said: {message}")
             return data
-        raise GraphError("Microsoft's email service is busy; try again in a minute.")
+        raise GraphError(f"Microsoft's {what} service is busy; try again in a minute.")
 
     async def close(self) -> None:
         if self._session and not self._session.closed:
