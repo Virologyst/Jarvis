@@ -26,6 +26,7 @@ from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from jarvis_protocol.markdown import outside_code
 from jarvis_protocol.progress import refresh_bar
 from jarvis_protocol.routines import RoutineError, mark_done
 
@@ -166,14 +167,8 @@ def _body_start(lines: list[str]) -> int:
 
 
 def _outside_code(lines: list[str]):
-    """(index, line) for lines of the body that aren't inside ``` code blocks."""
-    in_code = False
-    for i in range(_body_start(lines), len(lines)):
-        if lines[i].lstrip().startswith("```"):
-            in_code = not in_code
-            continue
-        if not in_code:
-            yield i, lines[i]
+    """(index, line) for lines of the body that aren't inside ``` or ~~~ code blocks."""
+    yield from outside_code(lines, _body_start(lines))
 
 
 def _headings(lines: list[str]) -> list[tuple[int, int, str]]:

@@ -26,6 +26,8 @@ import re
 from dataclasses import dataclass
 from datetime import date, timedelta
 
+from .markdown import outside_code
+
 PERIODS = ("daily", "weekly", "monthly")
 HEADING = "routines"
 _HEAD = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
@@ -75,12 +77,8 @@ def _width(text: str) -> int:
 def _section(lines: list[str]) -> tuple[int, int] | None:
     """(first line, end) of the Routines heading's section, code blocks skipped."""
     start = level = None
-    in_code = False
-    for i, line in enumerate(lines):
-        if line.lstrip().startswith("```"):
-            in_code = not in_code
-            continue
-        m = None if in_code else _HEAD.match(line)
+    for i, line in outside_code(lines):
+        m = _HEAD.match(line)
         if not m:
             continue
         if start is None:

@@ -19,6 +19,14 @@ prepend, replace one section, create a note), `obsidian_delete`, `obsidian_show`
 never replace a whole note or overwrite an existing one, and Jarvis asks before reorganising
 anything.
 
+Sections are found by the terminal itself (`jarvis_protocol/markdown.py`, shared with the
+`vault_*` tools), not the plugin: lines starting with `#` inside fenced code blocks (``` or
+`~~~`, such as a `markmap` block) or the front matter aren't headings. A section runs from its
+heading to the next heading of the same or a higher level. `replace` swaps that section's text in
+place, keeping the heading line as it was, and changes nothing if the heading isn't there;
+`append` adds at the end of the section (a missing heading is made: `##` at the end of the note,
+or one level under the deepest parent that's there). Every edit is saved with If-Match.
+
 `obsidian_delete` removes an exact passage, or a heading with its whole section (a `Log` heading
 under it is left alone), only when Sir asks. It goes on an approval card: the terminal first
 finds it without saving (`preview`), so a passage that's missing or there more than once is said

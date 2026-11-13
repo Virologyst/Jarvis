@@ -13,7 +13,7 @@ from jarvis_brain.persona import SYSTEM_PROMPT  # noqa: E402
 from jarvis_brain.selfupgrade import tool_schema_problems  # noqa: E402
 from jarvis_brain.tools import TOOLS, ToolBox  # noqa: E402
 from jarvis_brain.vault import (  # noqa: E402
-    Vault, VaultError, find_tasks, read_properties, set_property,
+    Vault, VaultError, find_section, find_tasks, read_properties, set_property,
 )
 
 try:
@@ -138,6 +138,14 @@ def test_tasks_skip_code_blocks():
     assert [t.text for t in tasks][:2] == ["Run the installer", "Brain running"]
     assert not any("inside code" in t.text for t in tasks)
     assert tasks[-1].for_j and tasks[1].done
+
+
+def test_sections_skip_tilde_fences_and_a_markmap_front_matter():
+    lines = ["# P", "## Map", "~~~markmap", "---", "markmap: {}", "---", "# P", "## Hirers",
+             "```", "~~~", "- after", "### Detail", "- d", "## Log", "- x"]
+    s = find_section(lines, "Map", exact=True)
+    assert (s.line, s.level, s.end, s.own_end) == (1, 2, 13, 11)
+    assert find_section(lines, "Hirers", exact=True) is None
 
 
 # --- Reading -----------------------------------------------------------------------------------

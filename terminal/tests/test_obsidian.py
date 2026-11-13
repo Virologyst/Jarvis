@@ -130,18 +130,136 @@ def test_adding_under_a_heading_keeps_the_list_tight():
     assert not any(c[0] == "PATCH" for c in fake.calls)
 
 
-def test_missing_headings_and_replace_use_the_plugin_new_and_old_api():
-    for old in (False, True):
-        b, fake = bridge(old_patch=old)
-        ok, text = b.handle("obsidian_edit", {"action": "append", "heading": "Risks",
-                                              "text": "- sync"})
-        assert ok and "## Risks\n- sync" in fake.files["Projects/J.A.R.V.I.S.md"]
-        ok, text = b.handle("obsidian_edit", {"action": "replace", "heading": "Log",
-                                              "text": "- redone"})
-        assert text == "Replaced Log in Projects/J.A.R.V.I.S.md."
-        assert "## Log\n- redone" in fake.files["Projects/J.A.R.V.I.S.md"]
-    patches = [c for c in fake.calls if c[0] == "PATCH"]
-    assert patches[-1][2]["target-delimiter"] == "::"
+def test_missing_headings_are_made_and_replace_is_done_in_place():
+    b, fake = bridge()
+    ok, text = b.handle("obsidian_edit", {"action": "append", "heading": "Risks", "text": "- sync"})
+    assert ok and text == "Added a new heading Risks, with that under it, in Projects/J.A.R.V.I.S.md."
+    assert fake.files["Projects/J.A.R.V.I.S.md"] == NOTE + "\n## Risks\n- sync\n"
+    ok, text = b.handle("obsidian_edit", {"action": "append", "heading": "Ideas > Pricing",
+                                          "text": "- free tier"})
+    assert ok and "## Ideas\n- voice\n### Pricing\n- free tier\n## Log" in \
+        fake.files["Projects/J.A.R.V.I.S.md"]
+    ok, text = b.handle("obsidian_edit", {"action": "replace", "heading": "Log",
+                                          "text": "- redone"})
+    assert text == "Replaced Log in Projects/J.A.R.V.I.S.md."
+    assert "## Log\n- redone\n\n## Risks" in fake.files["Projects/J.A.R.V.I.S.md"]
+    assert "- started" not in fake.files["Projects/J.A.R.V.I.S.md"]
+    assert not any(c[0] == "PATCH" for c in fake.calls)       # the plugin's edits aren't used
+
+
+PORTAL = """---
+type: project
+status: active
+---
+# Portal
+<div class="jarvis-progress"></div>
+
+## Status
+Template: what's happening.
+
+## Next up
+- [ ] template step
+
+## How it fits together
+```markmap
+---
+markmap:
+  colorFreezeLevel: 2
+---
+# Portal
+## Hirers
+- post a job
+## Workers
+- apply
+```
+A line after the map.
+
+### Detail
+- under the map
+
+## Log
+- 2026-11-01: Project started.
+"""
+
+
+def test_read_a_section_with_a_markmap_code_block_in_it():
+    b, _ = bridge(files={"Projects/Portal.md": PORTAL})
+    ok, text = b.handle("obsidian_read", {"note": "Portal", "heading": "How it fits together"})
+    assert ok and text.endswith("A line after the map.\n\n### Detail\n- under the map\n")
+    assert "## Workers\n- apply\n```" in text and "## Log" not in text
+    ok, text = b.handle("obsidian_read", {"note": "Portal", "heading": "Hirers"})
+    assert not ok and "Its headings: Portal, Status, Next up, How it fits together, Detail, " \
+        "Log." in text
+    ok, text = b.handle("obsidian_read", {"note": "Portal", "heading": "How it fits together > "
+                                          "Detail"})
+    assert ok and text.endswith("### Detail\n- under the map\n")
+    tilde = "# A\n~~~\n# not a heading\n```\n## still code\n~~~\nafter\n# B\nb\n"
+    assert section(tilde, ["A"]) == "# A\n~~~\n# not a heading\n```\n## still code\n~~~\nafter"
+    assert cut(tilde, path=["A"])[0] == "# B\nb\n"
+
+
+def test_replace_several_sections_in_a_row_keeps_them_in_place():
+    b, fake = bridge(files={"Projects/Portal.md": PORTAL})
+    for heading, text in (("Status", "Building the hirer sign-up."),
+                          ("Next up", "## Next up\n- [ ] wire up payments"),   # heading copied
+                          ("How it fits together", "```markmap\n# Portal\n## Hirers\n```"),
+                          ("Log", "- 2026-11-13: Rewritten.")):
+        ok, said = b.handle("obsidian_edit", {"note": "Portal", "action": "replace",
+                                              "heading": heading, "text": text})
+        assert ok and said == f"Replaced {heading} in Projects/Portal.md.", said
+    assert fake.files["Projects/Portal.md"] == """---
+type: project
+status: active
+---
+# Portal
+<div class="jarvis-progress"></div>
+
+## Status
+Building the hirer sign-up.
+
+## Next up
+- [ ] wire up payments
+
+## How it fits together
+```markmap
+# Portal
+## Hirers
+```
+
+## Log
+- 2026-11-13: Rewritten.
+"""
+
+
+def test_nested_subheadings_and_appending_at_the_end_of_a_section():
+    note = "# P\n## Tasks\n- a\n### Later\n- b\n\n## Notes\n- n\n"
+    b, fake = bridge(files={"P.md": note})
+    b.handle("obsidian_edit", {"note": "P", "action": "replace", "heading": "Tasks > Later",
+                               "text": "- c"})
+    assert fake.files["P.md"] == "# P\n## Tasks\n- a\n### Later\n- c\n\n## Notes\n- n\n"
+    b.handle("obsidian_edit", {"note": "P", "action": "append", "heading": "Tasks",
+                               "text": "- d"})
+    assert fake.files["P.md"] == "# P\n## Tasks\n- a\n### Later\n- c\n- d\n\n## Notes\n- n\n"
+    b.handle("obsidian_edit", {"note": "P", "action": "replace", "heading": "Tasks",
+                               "text": "- only"})            # the whole section, as read gives it
+    assert fake.files["P.md"] == "# P\n## Tasks\n- only\n\n## Notes\n- n\n"
+    b, fake = bridge(files={"Projects/Portal.md": PORTAL})
+    b.handle("obsidian_edit", {"note": "Portal", "action": "append",
+                               "heading": "How it fits together", "text": "- added"})
+    assert "### Detail\n- under the map\n- added\n\n## Log" in fake.files["Projects/Portal.md"]
+    assert fake.files["Projects/Portal.md"].count("How it fits together") == 1
+
+
+def test_replace_a_missing_heading_changes_nothing():
+    b, fake = bridge(files={"Projects/Portal.md": PORTAL})
+    ok, text = b.handle("obsidian_edit", {"note": "Portal", "action": "replace",
+                                          "heading": "Hirers", "text": "- x"})
+    assert not ok and "has no heading Hirers, so I changed nothing" in text
+    ok, text = b.handle("obsidian_edit", {"note": "Portal", "action": "replace",
+                                          "heading": "Status > Nope", "text": "- x"})
+    assert not ok and "no heading Status > Nope" in text
+    assert fake.files["Projects/Portal.md"] == PORTAL
+    assert not any(c[0] in ("PUT", "PATCH") for c in fake.calls)
 
 
 def test_never_overwrites_typing_that_happened_meanwhile():

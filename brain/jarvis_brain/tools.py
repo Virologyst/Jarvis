@@ -853,7 +853,9 @@ TOOLS += [
             "Write in Sir's Obsidian notes, live on his screen. append adds to the end of the "
             "note or under a heading (made if missing): a new mind map branch is a heading or "
             "a nested bullet under the right heading. prepend adds at the top. replace swaps out "
-            "one heading's section (only when Sir asks to rewrite it). create makes a new note "
+            "one heading's section in place, subheadings included, exactly what obsidian_read "
+            "gives for it (only when Sir asks to rewrite it; the heading must exist, and it "
+            "stays as it is, so text needn't repeat it). create makes a new note "
             "(note = its name or path; it must not exist). Markdown text: '- ' bullets, nested "
             "with two spaces; '- [ ] ' tasks."),
         "input_schema": _schema(

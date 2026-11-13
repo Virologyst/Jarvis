@@ -32,6 +32,8 @@ import urllib.parse
 import urllib.request
 from datetime import date
 
+from jarvis_protocol.markdown import HEADING
+from jarvis_protocol.markdown import headings as md_headings
 from jarvis_protocol.progress import refresh_bar
 from jarvis_protocol.routines import RoutineError, mark_done
 
@@ -111,20 +113,80 @@ def split_heading(heading: str | None) -> list[str]:
     return [p.lstrip("#").strip() for p in parts if p.strip()]
 
 
-def section_lines(lines: list[str], path: list[str]) -> tuple[int, int] | None:
-    """(heading line, line after the section) for a heading path, or None if there's no such
-    heading. Each later heading must sit inside the one before it."""
-    marks = [(i, len(m.group(1)), m.group(2).strip().lower()) for i, line in enumerate(lines)
-             if (m := re.match(r"^(#{1,6})\s+(.*?)\s*#*\s*$", line))]
-    start, end, level = -1, len(lines), 0
+def _marks(lines: list[str]) -> list[tuple[int, int, str]]:
+    """(line, level, lowercased title) for the note's real headings: none inside code blocks
+    or the front matter."""
+    return [(i, n, title.lower()) for i, n, title in md_headings(lines)]
+
+
+def _find(lines: list[str], path: list[str]) -> tuple[int, int, int, int]:
+    """(heading line, line after its section, its level, how many parts of the path were found)
+    for the deepest heading of the path that's there; (-1, len(lines), 0, 0) if none is. A
+    section runs to the next heading of the same or a higher level. Each later heading must sit
+    inside the one before it."""
+    marks = _marks(lines)
+    start, end, level, found = -1, len(lines), 0, 0
     for want in (p.lower() for p in path):
         hit = next(((i, n) for i, n, title in marks
                     if start < i < end and n > level and title == want), None)
         if hit is None:
-            return None
+            break
         start, level = hit
         end = next((i for i, n, _ in marks if i > start and n <= level), len(lines))
-    return start, end
+        found += 1
+    return start, end, level, found
+
+
+def section_lines(lines: list[str], path: list[str]) -> tuple[int, int] | None:
+    """(heading line, line after the section) for a heading path, or None if there's no such
+    heading."""
+    start, end, _, found = _find(lines, path)
+    return (start, end) if path and found == len(path) else None
+
+
+def _join(lines: list[str], like: str) -> str:
+    return "\n".join(lines) + ("\n" if like.endswith("\n") or not like else "")
+
+
+def replace_section(text: str, path: list[str], new: str) -> str | None:
+    """The note with a heading's section (everything up to the next heading of the same or a
+    higher level, as obsidian_read gives it) swapped for `new`, in place. The heading line is
+    kept as it was (text and level); a copy of it at the start of `new` isn't doubled. Blank
+    lines before the next heading are kept. None if the heading isn't there."""
+    crlf = "\r\n" in text
+    text = text.replace("\r\n", "\n")
+    lines = text.splitlines()
+    found = section_lines(lines, path)
+    if found is None:
+        return None
+    start, end = found
+    body = new.replace("\r\n", "\n").strip("\n").splitlines()
+    m = HEADING.match(body[0]) if body else None
+    if m and m.group(2).strip().lower() == path[-1].lower():
+        body = body[1:]
+        while body and not body[0].strip():
+            body = body[1:]
+    gap = 0
+    while end - gap - 1 > start and not lines[end - gap - 1].strip():
+        gap += 1
+    out = _join(lines[:start + 1] + body + [""] * gap + lines[end:], text)
+    return out.replace("\n", "\r\n") if crlf else out
+
+
+def add_section(text: str, path: list[str], new: str) -> str:
+    """The note with the missing part of a heading path made and `new` under it: at the end of
+    the deepest heading that's there, one level below it, or at the end of the note as '##'."""
+    lines = text.splitlines()
+    start, end, level, found = _find(lines, path)
+    level = level or 1
+    spot = end
+    while spot > start + 1 and not lines[spot - 1].strip():
+        spot -= 1
+    added = [] if spot == 0 or found else [""]
+    for n, part in enumerate(path[found:], 1):
+        added.append("#" * min(6, level + n) + " " + part)
+    added += new.strip("\n").splitlines()
+    return _join(lines[:spot] + added + lines[spot:], text)
 
 
 def section(text: str, path: list[str]) -> str | None:
@@ -219,7 +281,7 @@ def project_update(text: str, progress="", status="", next_step="", log_entry=""
     front = _set_prop(front, "updated", today)
     body = refresh_bar(body, _get_prop(front, "progress") or 0)
     lines = body.split("\n")
-    at = next((i for i, ln in enumerate(lines) if re.match(r"^#{1,6}\s+Log\s*$", ln)), None)
+    at = next((i for i, _, title in md_headings(lines, 0) if title.lower() == "log"), None)
     new = [f"- {today}: {e}" for e in entries]
     if at is None:
         lines = [*lines[:len(lines) - (1 if lines and not lines[-1] else 0)], "", "## Log", *new, ""]
@@ -244,8 +306,7 @@ def cut(text: str, passage: str = "", path: list[str] | None = None,
             raise ObsidianError("Give a heading or a passage to delete, not both.")
         lines = text.splitlines(keepends=True)
         starts = [sum(len(ln) for ln in lines[:i]) for i in range(len(lines) + 1)]
-        marks = [(i, len(m.group(1)), m.group(2).strip().lower()) for i, line in enumerate(lines)
-                 if (m := re.match(r"^(#{1,6})\s+(.*?)\s*#*\s*$", line.rstrip("\n")))]
+        marks = _marks([ln.rstrip("\n") for ln in lines])
         lo, hi = -1, len(lines)                    # inside the parent heading, if one is given
         if len(path) > 1:
             parent = section_lines([ln.rstrip("\n") for ln in lines], path[:-1])
@@ -294,7 +355,7 @@ def cut(text: str, passage: str = "", path: list[str] | None = None,
 
 
 def headings(text: str) -> list[str]:
-    return [m.group(2).strip() for m in re.finditer(r"^(#{1,6})\s+(.*?)\s*#*\s*$", text, re.M)]
+    return [title for _, _, title in md_headings(text.splitlines())]
 
 
 # --- Changing canvas boards ---------------------------------------------------------------------
@@ -656,57 +717,52 @@ class ObsidianBridge:
             raise ObsidianError("There's nothing to write.")
         api, path = self._target(note)
         parts = split_heading(heading)
+        where = " > ".join(parts)
         if action == "replace":
             if not parts:
                 raise ObsidianError("I only replace a section under a heading, never a whole note.")
-            self._patch(api, action, parts, text)
-            return f"Replaced {' > '.join(parts)} in {path}."
-        if not self._splice(api, text, parts, action == "prepend"):
-            self._patch(api, action, parts, text)       # no such heading: the plugin makes it
-        if parts:
-            where = ("at the top of " if action == "prepend" else "under ") + " > ".join(parts)
-            return f"Added {where} in {path}."
-        return f"Added to the {'top' if action == 'prepend' else 'end'} of {path}."
 
-    def _splice(self, api: str, text: str, parts: list[str], at_top: bool) -> bool:
-        """Add text into the note ourselves (the plugin's own append leaves a blank line that
-        splits a list), saved only if the note hasn't changed since it was read (If-Match), so
-        Sir's typing is never overwritten; tries twice. False if the heading isn't there."""
+            def replaced(current: str) -> str:
+                updated = replace_section(current, parts, text)
+                if updated is None:
+                    raise ObsidianError(f"{path} has no heading {where}, so I changed nothing. "
+                                        "Its headings: " + (", ".join(headings(current))
+                                                            or "none") + ".")
+                return updated
+
+            self._rewrite(api, replaced)
+            return f"Replaced {where} in {path}."
+        at_top, made = action == "prepend", []
+
+        def added(current: str) -> str:
+            updated = insert(current, text, parts, at_top)
+            made[:] = [updated is None]
+            return add_section(current, parts, text) if updated is None else updated  # make it
+
+        self._rewrite(api, added)
+        if any(made):
+            return f"Added a new heading {where}, with that under it, in {path}."
+        if parts:
+            return f"Added {'at the top of ' if at_top else 'under '}{where} in {path}."
+        return f"Added to the {'top' if at_top else 'end'} of {path}."
+
+    def _rewrite(self, api: str, change) -> None:
+        """Change the note ourselves (the plugin's own heading edits don't know about code
+        blocks, and its append leaves a blank line that splits a list), saved only if the note
+        hasn't changed since it was read (If-Match), so Sir's typing is never overwritten;
+        tries twice. `change` takes the note's text and gives the new text, or raises."""
         for attempt in range(2):
             current, info = self._exchange("GET", api, headers={"Accept": "text/markdown"})
-            updated = insert(current, text, parts, at_top)
-            if updated is None:
-                return False
+            updated = change(current)
             tag = info.get("etag")
             try:
                 self._call("PUT", api, updated, {"Content-Type": "text/markdown",
                                                  **({"If-Match": tag} if tag else {})})
-                return True
+                return
             except ObsidianError as e:
                 if "(412)" not in str(e) or attempt:
                     raise
                 log.info("obsidian: note changed while writing; trying again")
-        return True
-
-    def _patch(self, api: str, action: str, parts: list[str], text: str) -> None:
-        """Edit under a heading, making the heading if it's missing. The plugin's newer API takes
-        a JSON instruction; older releases take headers with a :: path. Try new, then old."""
-        content = text if text.endswith("\n") else text + "\n"
-        try:
-            self._call("PATCH", api, json.dumps({
-                "operation": action, "targetType": "heading", "target": parts,
-                "content": content, "createTargetIfMissing": True}),
-                {"Content-Type": "application/vnd.olrapi.patch-instruction+json",
-                 "Markdown-Patch-Version": "2"})
-            return
-        except ObsidianError as e:
-            if not re.search(r"\((400|405|415|422)\)", str(e)):
-                raise
-            log.info("obsidian: newer PATCH refused (%s); trying the older form", e)
-        self._call("PATCH", api, content, {
-            "Content-Type": "text/markdown", "Operation": action, "Target-Type": "heading",
-            "Target": urllib.parse.quote("::".join(parts)), "Target-Delimiter": "::",
-            "Create-Target-If-Missing": "true"})
 
     def op_project(self, note: str = "", progress: str = "", status: str = "", next: str = "",
                    log_entry: str = "") -> str:
