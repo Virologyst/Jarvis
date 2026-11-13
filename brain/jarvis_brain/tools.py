@@ -5,7 +5,7 @@ the screen and the real work runs after someone taps Approve (see approvals.py).
 state (the screen theme, the task lists) changes directly, and so do Sir's Obsidian project notes,
 which he asked Jarvis to keep (additions, ticks and moves, each one logged; deleting from them
 goes on a card). Reading files (on the
-brain or a terminal) and searching or reading the web run directly; writing files on the brain
+brain or a terminal), searching or reading the web and reading GitHub run directly; writing files on the brain
 is proposed on a card like everything else. Add new tools here.
 """
 
@@ -27,6 +27,7 @@ from . import clock
 from .briefings import DEFAULT_SNOOZE_MIN, PERSONAL, BriefingError, BriefingSchedule
 from .files import FileAccessError, FileReader
 from .filewrite import FileWriter
+from .github import GitHubAccess
 from .graph import GraphError
 from .mail import REPLY_KIND, Mailbox
 from .outlook_calendar import Calendar
@@ -736,6 +737,93 @@ TOOLS += [
 ]
 _WEB_TOOLS = {"web_search", "read_web_page"}
 
+# --- Sir's GitHub repositories (github.py) -------------------------------------------------------
+# Read-only GETs to the GitHub REST API with the token in the brain's .env (JARVIS_GITHUB_TOKEN,
+# added by hand), so no card; nothing here can push, comment or merge. Repo contents are
+# untrusted, like web pages.
+_REPO = {"type": "string",
+         "description": "The repository: 'owner/name' or just its name as Sir said it, e.g. "
+                        "'Virologyst/Jarvis', 'EGH490', 'Project Huntsman', 'Aptium-Ai/API'."}
+_BRANCH = {"type": "string", "description": "A branch (or tag or commit); empty for the default."}
+TOOLS += [
+    {
+        "name": "github_repos",
+        "description": (
+            "GitHub: list Sir's git repositories (repos) the token can see, private ones too, "
+            "with description, language and when each last changed."),
+        "input_schema": _schema({}, []),
+    },
+    {
+        "name": "github_repo_overview",
+        "description": (
+            "GitHub repository overview: a git repo's description, default branch, branches, "
+            "latest commits, open issues and pull requests counts, and README text. Start here "
+            "to summarise a repo."),
+        "input_schema": _schema({"repo": _REPO}, ["repo"]),
+    },
+    {
+        "name": "github_list_folder",
+        "description": (
+            "GitHub repository files: list a folder's contents (folders and files with sizes) in "
+            "a git repo, at a branch."),
+        "input_schema": _schema(
+            {"repo": _REPO, "branch": _BRANCH,
+             "path": {"type": "string", "description": "Folder path; empty for the top."}},
+            ["repo"]),
+    },
+    {
+        "name": "github_read_file",
+        "description": (
+            "GitHub repository: read a text file in a git repo at a branch and path (code, "
+            "README, docs). Long files come back in parts; the result says which start to use "
+            "to read on. Summarise code, never read it out."),
+        "input_schema": _schema(
+            {"repo": _REPO, "branch": _BRANCH,
+             "path": {"type": "string", "description": "The file's path, e.g. 'src/main.py'."},
+             "start": {"type": "integer",
+                       "description": "Character to start from: 0 for the beginning."}},
+            ["repo", "path"]),
+    },
+    {
+        "name": "github_commits",
+        "description": (
+            "GitHub git commits: recent commit history of a repo with messages, authors and "
+            "dates, optionally on one branch or touching one path."),
+        "input_schema": _schema(
+            {"repo": _REPO, "branch": _BRANCH,
+             "path": {"type": "string", "description": "Only commits touching this file or "
+                                                       "folder."},
+             "count": {"type": "string", "description": "How many, 1 to 30 (default 10)."}},
+            ["repo"]),
+    },
+    {
+        "name": "github_issues",
+        "description": (
+            "GitHub issues or pull requests (PRs) of a git repo: list them with number, title, "
+            "author and last update."),
+        "input_schema": _schema(
+            {"repo": _REPO,
+             "kind": {"type": "string", "enum": ["issues", "pull requests"],
+                      "description": "Issues (the default) or pull requests."},
+             "state": {"type": "string", "enum": ["open", "closed", "all"],
+                       "description": "Default open."},
+             "count": {"type": "string", "description": "How many, 1 to 30 (default 10)."}},
+            ["repo"]),
+    },
+    {
+        "name": "github_read_issue",
+        "description": (
+            "GitHub: read one issue or pull request (PR) of a git repo by number: its "
+            "description, state, branches and comments."),
+        "input_schema": _schema(
+            {"repo": _REPO,
+             "number": {"type": "string", "description": "The issue or pull request number."}},
+            ["repo", "number"]),
+    },
+]
+_GITHUB_TOOLS = {"github_repos", "github_repo_overview", "github_list_folder", "github_read_file",
+                 "github_commits", "github_issues", "github_read_issue"}
+
 # --- Working in Obsidian with Sir (live, through a terminal's Local REST API plugin) ------------
 # Sent to a terminal as FileRequests ("obsidian_*"); the terminal calls Obsidian on its machine
 # (terminal/jarvis_terminal/obsidian.py). Unlike the vault_* tools, these see what Sir has open
@@ -988,10 +1076,12 @@ class ToolBox:
                  coder_terminals: Callable[[], dict[str, RemoteFiles]] | None = None,
                  web: WebAccess | None = None,
                  calendar: Calendar | None = None,
-                 briefings: BriefingSchedule | None = None):
+                 briefings: BriefingSchedule | None = None,
+                 github: GitHubAccess | None = None):
         self.upgrades = upgrades
         self.briefings = briefings
         self.web = web
+        self.github = github
         self.calendar = calendar
         self.obsidian_terminals = obsidian_terminals or dict
         self.coder_terminals = coder_terminals or dict
@@ -1071,6 +1161,10 @@ class ToolBox:
             except (TypeError, ValueError):
                 start = 0
             return await self.web.read(str(args.get("url") or ""), start)
+        if name in _GITHUB_TOOLS:
+            if self.github is None:
+                return "GitHub access isn't connected here."
+            return await self.github.run(name, args)
         if name in _VAULT_TOOLS or name in _VAULT_DELETE_TOOLS:
             if self.vault is None:
                 return "The notes vault isn't connected here."

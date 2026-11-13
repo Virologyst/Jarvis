@@ -53,6 +53,7 @@ from .outlook_calendar import Calendar
 from .mail_watch import Announcement, ImportantSenders, MailWatcher, Sorter, parse_quiet
 from .tasks import TaskStore
 from .vault import Vault
+from .github import TOKEN_VAR as GITHUB_TOKEN_VAR, GitHubAccess
 from .web import KEY_VAR as WEB_KEY_VAR, WebAccess
 from .tools import REQUEST_TOOLS, ToolBox
 from .tts import make_speaker
@@ -124,6 +125,10 @@ class Brain:
         self.web = WebAccess.from_env()
         log.info("web search: %s", "configured" if self.web.search_configured
                  else f"not set up ({WEB_KEY_VAR})")
+        # Sir's GitHub repositories (github.py): read-only, with the token he adds to .env by hand
+        self.github = GitHubAccess.from_env()
+        log.info("github: %s", "configured" if self.github.configured
+                 else f"not set up ({GITHUB_TOKEN_VAR})")
         self.reminders = ReminderService(self.tasks, self.deliver_reminder)
         # Scheduled briefings (briefings.py): gathered with the same tools as daily_priorities,
         # reading Sir's notes through whichever terminal reaches Obsidian, then said like reminders
@@ -164,6 +169,7 @@ class Brain:
                 with contextlib.suppress(asyncio.CancelledError):
                     await loop
         await self.web.close()
+        await self.github.close()
 
     async def deliver_reminder(self, due) -> bool:
         """Say a task reminder (or an email announcement) on every terminal, each as soon as
@@ -281,6 +287,7 @@ class TerminalSession:
                         vault=getattr(brain, "vault", None),
                         mailbox=getattr(brain, "mailbox", None),
                         web=getattr(brain, "web", None),
+                        github=getattr(brain, "github", None),
                         calendar=getattr(brain, "calendar", None),
                         briefings=getattr(brain, "briefings", None))
         self.conversation = Conversation(brain.client, s.model, s.effort, s.idle_reset_minutes,

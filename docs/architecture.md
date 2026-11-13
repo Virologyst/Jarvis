@@ -171,6 +171,12 @@ with no cookies, so no approval card; only public internet addresses (checked at
 every redirect), with timeouts and size caps. Web content is untrusted, like email. See
 [web.md](web.md).
 
+## GitHub
+`brain/jarvis_brain/github.py`: seven `github_*` tools that read Sir's repositories (private ones
+too) through the GitHub REST API with the token `JARVIS_GITHUB_TOKEN` in the brain's `.env`, added
+by hand. Only GETs to `api.github.com`, so no approval card; repo contents are untrusted, like web
+pages, and results leave out web addresses. See [github.md](github.md).
+
 ## Roadmap
 1. Skeleton: wake word → STT → Claude → TTS on the dev PC. Built and tested end to end
    except the Claude call itself (needs an API key in `.env`). Measured on the dev PC
